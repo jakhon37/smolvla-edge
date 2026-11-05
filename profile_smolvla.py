@@ -154,7 +154,7 @@ def main() -> None:
     out = args.out or Path("results") / f"profile_{gpu}_{stamp}.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     payload = {
-        "tool": "smolvla-latency/profile_smolvla.py",
+        "tool": "smolvla-edge/profile_smolvla.py",
         "utc": stamp,
         "args": {k: str(v) for k, v in vars(args).items()},
         "system": meta,

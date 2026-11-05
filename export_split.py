@@ -217,7 +217,7 @@ def main() -> None:
     exported = {p: export_precision(policy, run, args.out_dir, p, args.opset) for p in precisions}
     manifest = write_manifest(args.out_dir, policy, run, exported, args.policy)
 
-    report = {"tool": "smolvla-latency/export_split.py", "system": sysinfo.collect(), "policy": args.policy,
+    report = {"tool": "smolvla-edge/export_split.py", "system": sysinfo.collect(), "policy": args.policy,
               "task": args.task, "seed": args.seed, "manifest": MANIFEST, "reference_tf32": False,
               "language_padding": padding, "variants": {}}
     providers = ort_providers(args.device)  # with CUDA, TF32 off: the fp32 graphs meet the strict fp32 reference

@@ -1,4 +1,4 @@
-# smolvla-latency
+# smolvla-edge
 
 Where does [SmolVLA](https://huggingface.co/papers/2506.01844)'s time go on a small GPU, and what do lower precisions and TensorRT buy without changing its actions?
 
@@ -55,7 +55,7 @@ These come from the source, not from measurement.
 ### On a GPU machine (lab server, Colab, Kaggle)
 
 ```bash
-git clone https://github.com/jakhon37/smolvla-latency && cd smolvla-latency
+git clone https://github.com/jakhon37/smolvla-edge && cd smolvla-edge
 bash scripts/setup_env.sh                 # Python 3.12 venv in ~/venvs/smolvla: torch cu128, LeRobot 0.6.1, TensorRT 10.16
 bash scripts/run_p0.sh                    # env check, profile, ONNX export, TensorRT fp16 + fp32
 ```

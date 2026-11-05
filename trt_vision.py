@@ -172,7 +172,7 @@ def main() -> None:
     print(f"TensorRT p50 {latency['p50']:.3f} ms  p99 {latency['p99']:.3f} ms")
 
     report = {
-        "tool": "smolvla-latency/trt_vision.py",
+        "tool": "smolvla-edge/trt_vision.py",
         "system": sysinfo.collect(),
         "tensorrt": trt.__version__,
         "onnx": str(args.onnx), "mode": args.mode, "tf32": args.tf32,
