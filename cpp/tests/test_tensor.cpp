@@ -22,6 +22,10 @@ TEST(DType, NamesRoundTripAndSizes) {
   EXPECT_EQ(dtype_size(DType::kInt64), 8u);
   EXPECT_EQ(dtype_size(DType::kBool), 1u);
   EXPECT_THROW(parse_dtype("float64"), std::invalid_argument);
+  // int32 is how a TensorRT 8.5 engine takes lang_tokens; manifests and bundles still may not hold it.
+  EXPECT_EQ(dtype_size(DType::kInt32), 4u);
+  EXPECT_STREQ(dtype_name(DType::kInt32), "int32");
+  EXPECT_THROW(parse_dtype("int32"), std::invalid_argument);
 }
 
 TEST(TensorSpec, BytesAndDescription) {

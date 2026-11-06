@@ -1,0 +1,150 @@
+{
+ "tool": "smolvla_rt_bench",
+ "onnx_dir": "onnx",
+ "bundle": "onnx/bundle.bin",
+ "precision": "fp32",
+ "backend": "TensorRT 8.5.2",
+ "threads": 0,
+ "allow_spinning": true,
+ "config": {
+  "camera_keys": [
+   "observation.images.image",
+   "observation.images.image2"
+  ],
+  "image_hw": [
+   512,
+   512
+  ],
+  "image_tokens": 64,
+  "lang_len": 48,
+  "state_dim": 8,
+  "max_state_dim": 32,
+  "action_dim": 7,
+  "max_action_dim": 32,
+  "chunk_size": 50,
+  "num_steps": 10,
+  "num_layers": 4,
+  "expert_layers": 4,
+  "kv_heads": 2,
+  "head_dim": 64,
+  "prefix_len": 177
+ },
+ "system": {
+  "cpu": "ARMv8 Processor rev 0 (v8l)",
+  "hardware_threads": 6,
+  "usable_cpus": 6,
+  "compiler": "9.4.0",
+  "assertions": false,
+  "smolvla_rt": "0.1.0",
+  "utc": "2026-11-06T18:14:51Z"
+ },
+ "euler_schedule_matches_bundle": true,
+ "parity": {
+  "actions": {
+   "max_abs": 1.6391277313232422e-06,
+   "mean_abs": 5.316202129636492e-07,
+   "rel_l2": 6.635493389658416e-07,
+   "cosine": 0.9999999999997814,
+   "nonfinite": 0
+  },
+  "rerun_identical": true,
+  "pipeline_vs_lerobot": {
+   "image_tokens_0": {
+    "max_abs": 3.337860107421875e-06,
+    "mean_abs": 6.958034267275556e-07,
+    "rel_l2": 7.909866666812845e-07,
+    "cosine": 0.9999999999996722,
+    "nonfinite": 0
+   },
+   "image_tokens_1": {
+    "max_abs": 3.516674041748047e-06,
+    "mean_abs": 7.059639225796369e-07,
+    "rel_l2": 8.030310920255876e-07,
+    "cosine": 0.9999999999996629,
+    "nonfinite": 0
+   },
+   "past_key_values": {
+    "max_abs": 1.4156103134155273e-05,
+    "mean_abs": 2.2589213864164333e-07,
+    "rel_l2": 1.6782631217727145e-06,
+    "cosine": 0.9999999999984346,
+    "nonfinite": 0
+   },
+   "prefix_pad_mask_equal": true,
+   "x_t_all_steps": {
+    "max_abs": 2.682209014892578e-06,
+    "mean_abs": 4.1799611062742767e-07,
+    "rel_l2": 5.511287049785483e-07,
+    "cosine": 0.9999999999998225,
+    "nonfinite": 0
+   },
+   "v_t_all_steps": {
+    "max_abs": 1.055002212524414e-05,
+    "mean_abs": 1.6050233098212629e-06,
+    "rel_l2": 3.9382747725154005e-06,
+    "cosine": 0.9999999999922293,
+    "nonfinite": 0
+   }
+  }
+ },
+ "max_abs_gate": 0.0001,
+ "warmup": 2,
+ "iters": 20,
+ "latency_ms": {
+  "chunk": {
+   "p50": 46.3622305,
+   "p90": 56.5112935,
+   "p99": 61.438568319999995,
+   "mean": 47.72410385000001,
+   "min": 41.250085,
+   "max": 62.576264,
+   "n": 20
+  },
+  "vision": {
+   "p50": 7.8573129999999995,
+   "p90": 9.642769900000001,
+   "p99": 11.26797953,
+   "mean": 8.1360171,
+   "min": 6.813121,
+   "max": 11.288834,
+   "n": 40
+  },
+  "prefix": {
+   "p50": 3.6360805000000003,
+   "p90": 4.6512896,
+   "p99": 4.8082417699999995,
+   "mean": 3.79893955,
+   "min": 3.254016,
+   "max": 4.830209,
+   "n": 20
+  },
+  "expert_step": {
+   "p50": 2.3708805,
+   "p90": 2.95232,
+   "p99": 3.45187104,
+   "mean": 2.464650699999999,
+   "min": 2.014272,
+   "max": 4.401505,
+   "n": 200
+  },
+  "inputs": {
+   "p50": 1.4348640000000001,
+   "p90": 1.5889633,
+   "p99": 1.75889491,
+   "mean": 1.45168185,
+   "min": 1.31504,
+   "max": 1.784224,
+   "n": 20
+  },
+  "euler": {
+   "p50": 1.477583999999995,
+   "p90": 1.8383615999999985,
+   "p99": 1.9126799999999968,
+   "mean": 1.5143396499999993,
+   "min": 1.0872319999999966,
+   "max": 1.927423999999995,
+   "n": 20
+  }
+ },
+ "passed": true
+}

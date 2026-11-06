@@ -1,6 +1,7 @@
 #include "smolvla_rt/trt_graph.h"
 
 #include <NvInferRuntime.h>
+#include <NvInferVersion.h>
 
 #include <algorithm>
 #include <cstdio>
@@ -32,13 +33,17 @@ DType to_dtype(nvinfer1::DataType type, const std::string& what) {
       return DType::kFloat32;
     case nvinfer1::DataType::kHALF:
       return DType::kFloat16;
+#if NV_TENSORRT_MAJOR >= 10
     case nvinfer1::DataType::kINT64:
       return DType::kInt64;
+#endif
+    case nvinfer1::DataType::kINT32:  // TensorRT 8.5 has no int64: its ONNX parser narrows lang_tokens to int32
+      return DType::kInt32;
     case nvinfer1::DataType::kBOOL:
       return DType::kBool;
     default:
       throw std::runtime_error(what + " has TensorRT data type " + std::to_string(static_cast<int>(type)) +
-                               "; the split graphs only use float, half, int64 and bool");
+                               "; the split graphs only use float, half, int64 or int32, and bool");
   }
 }
 
@@ -141,8 +146,12 @@ void TrtGraph::run() {
 std::string TrtGraph::backend() const { return "TensorRT " + tensorrt_version(); }
 
 std::string tensorrt_version() {
-  const int32_t v = getInferLibVersion();  // major * 10000 + minor * 100 + patch since TensorRT 10
+  const int32_t v = getInferLibVersion();
+#if NV_TENSORRT_MAJOR >= 10
   return std::to_string(v / 10000) + "." + std::to_string(v / 100 % 100) + "." + std::to_string(v % 100);
+#else
+  return std::to_string(v / 1000) + "." + std::to_string(v / 100 % 10) + "." + std::to_string(v % 100);  // 8502
+#endif
 }
 
 }  // namespace smolvla_rt

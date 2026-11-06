@@ -197,6 +197,22 @@ def test_ort_flow_matches_predict_action_chunk_fp32(tiny, fp32):
         assert diff["max_abs"] < CHUNK_TOL
 
 
+def test_tensorrt85_graphs_match_lerobot_fp32(tiny, tmp_path):
+    exported = export_precision(tiny.policy, tiny.run, tmp_path, "fp32", 17, decompose_ln=True)
+    write_manifest(tmp_path, tiny.policy, tiny.run, {"fp32": exported}, "tiny")
+    assert exported["vision"]["layer_norms_decomposed"] > 0
+    for name in ("vision", "prefix", "expert_step"):
+        assert exported[name]["opset"] == {"ai.onnx": 17}, name  # torch.onnx alone leaves prefix and expert_step at 18
+        model = onnx.load(str(tmp_path / f"{name}_fp32.onnx"))
+        onnx.checker.check_model(model, full_check=True)
+        assert "LayerNormalization" not in {n.op_type for n in model.graph.node}
+        assert all(len(n.input) == 1 for n in model.graph.node if n.op_type == "ReduceMean"), name
+    res = check_runtime(SplitRuntime.from_dir(tmp_path, "fp32"), tiny.run, exported)
+    for name, g in res["graphs"].items():
+        assert g["ort_vs_lerobot_fp32"]["max_abs"] < FP32_TOL, (name, g["ort_vs_lerobot_fp32"])
+    assert res["actions_vs_lerobot_fp32"]["max_abs"] < CHUNK_TOL
+
+
 def test_manifest_is_the_graph_contract(tiny, fp32):
     cfg, graphs = fp32.manifest["config"], fp32.manifest["variants"]["fp32"]
     n_cams, n_layers, p_len = len(cfg["camera_keys"]), cfg["num_layers"], cfg["prefix_len"]

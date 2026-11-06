@@ -17,7 +17,7 @@ The study then:
 - reports latency (p50/p90/p99) and the action-chunk error against fp32;
 - exports the vision encoder to ONNX and TensorRT, checking parity before claiming any speed-up.
 
-Status: tooling complete and smoke-tested offline on CPU. Checked on the CPU with the real `lerobot/smolvla_libero` weights and LIBERO frames: see [Real weights (CPU)](#real-weights-cpu). GPU numbers pending.
+Status: tooling complete and smoke-tested offline on CPU. Checked on the CPU with the real `lerobot/smolvla_libero` weights and LIBERO frames: see [Real weights (CPU)](#real-weights-cpu). The fp32 path also runs on a Jetson Xavier NX GPU, so far with the tiny random test model only: see [Jetson Xavier NX](#jetson-xavier-nx-tensorrt-85). GPU numbers with real weights are pending.
 
 ## What the code says before any measurement (LeRobot 0.6.1, transformers 5.5)
 
@@ -132,7 +132,7 @@ $PY tools/dump_bundle.py --policy lerobot/smolvla_libero --out onnx_split/bundle
 
 | Part | What it is |
 |---|---|
-| `smolvla_rt` library | `Graph`, an interface over one graph with named, statically shaped inputs and outputs. `OrtGraph` implements it with the ONNX Runtime C++ API, on the CPU or the CUDA execution provider. `TrtGraph` implements it with the TensorRT 10 runtime API (`deserializeCudaEngine`, `setTensorAddress`, `enqueueV3`) and is built only when CMake finds TensorRT. `SmolVLARuntime` checks the three graphs against the contract and runs the chunk. Also readers for `split_manifest.json` and for bundles |
+| `smolvla_rt` library | `Graph`, an interface over one graph with named, statically shaped inputs and outputs. `OrtGraph` implements it with the ONNX Runtime C++ API, on the CPU or the CUDA execution provider. `TrtGraph` implements it with the TensorRT runtime API of versions 8.5 and 10 (`deserializeCudaEngine`, `setTensorAddress`, `enqueueV3`) and is built only when CMake finds TensorRT. `SmolVLARuntime` checks the three graphs against the contract and runs the chunk. Also readers for `split_manifest.json` and for bundles |
 | `smolvla_rt_bench` | Checks the chunk against a bundle's PyTorch actions (max abs, cosine) and, stage by stage, against LeRobot's intermediate tensors. Times every component (p50/p90/p99 after warm-up). Optionally runs the control-loop harness. Writes a JSON report |
 | Control-loop harness | A 50 Hz control thread takes one action per tick from a chunk buffer, which an inference thread refills when half a chunk is left. It reports wake-up latency, period error, missed deadlines and starved ticks per 10k ticks |
 | `smolvla_rt` Python module | Optional pybind11 build with `ort_flow.SplitRuntime`'s `predict_action_chunk(inputs, noise)` |
@@ -214,14 +214,48 @@ Control-loop harness: 10k ticks at 50 Hz on the same model (`--threads 1`), with
 - Inference took about 290 ms per chunk, and each request left 500 ms of actions, so no tick went without one.
 
 **Not tested**
-- `TrtGraph` has never run. It compiles, with `-Wall -Wextra -Wpedantic -Wshadow -Werror`, against the TensorRT 10.16 headers from NVIDIA's OSS repository and the CUDA 12.9 runtime headers, but was never linked to TensorRT or given an engine: there is no GPU or TensorRT here. This configuration repeats that check; it needs neither ONNX Runtime nor GoogleTest:
+- `TrtGraph` on TensorRT 10. It has only run on TensorRT 8.5.2, in [Jetson Xavier NX](#jetson-xavier-nx-tensorrt-85). Against 10 it compiles, with `-Wall -Wextra -Wpedantic -Wshadow -Werror`, with the TensorRT 10.16 headers from NVIDIA's OSS repository, but was never linked to it or given an engine. This configuration repeats that check; it needs neither ONNX Runtime nor GoogleTest:
   `cmake -S cpp -B cpp/build-trt -DSMOLVLA_RT_TRT_COMPILE_CHECK=ON -DSMOLVLA_RT_WERROR=ON -DSMOLVLA_RT_WITH_ORT=OFF -DSMOLVLA_RT_BUILD_TESTS=OFF -DTENSORRT_ROOT=<TensorRT/include parent> -DSMOLVLA_RT_CUDA_INCLUDE_DIR=<dir with cuda_runtime_api.h>`, then `cmake --build cpp/build-trt`.
 - Several GPUs. The current CUDA device belongs to each thread, and the runtime can be driven from threads other than the one that built it: the control loop's inference thread, or Python threads. `CudaDevice` therefore selects its device on the calling thread before every allocation, copy and free. `cpp/tests/test_cuda_device.cpp` checks that on the CPU against a stand-in for the CUDA runtime, one operation per new thread. `TrtGraph` selects its device in `run()` and in its destructor; that part is compile-checked only.
-- The real CUDA calls behind `CudaDevice` (`cpp/src/cuda_api.cpp`) were linked against CUDA 12.9's `libcudart`, but only the "no CUDA driver" error path ran.
+- The real CUDA calls behind `CudaDevice` (`cpp/src/cuda_api.cpp`) ran on the Jetson, on CUDA 11.4. They were linked against CUDA 12.9's `libcudart` too, but there only the "no CUDA driver" error path ran.
 - ONNX Runtime's CUDA execution provider: the SDK used here is CPU-only. With it, `OrtGraph` keeps buffers in host memory, so ONNX Runtime copies the prefix K/V to the GPU on every expert step; `TrtGraph` keeps them on the device.
-- The guard against a fused multiply-add in the Euler update (`Contract.EulerUpdateRoundsTheProductSeparately`, for the build's `-ffp-contract=off`) can only fail where the compiler may emit FMA instructions: aarch64, as on Jetson, or x86-64 built with `-march=native` on a CPU that has them. The default x86-64 target has no FMA, so on this VM and on the CI runner the test would pass without the flag too.
-- No GPU latency of any kind. The numbers in this section come from random weights. Real weights were checked on the CPU only, in [Real weights (CPU)](#real-weights-cpu). There the fp16 `vision` graph's attention scores stayed within ±48. The only overflow, inside the vision tower's GELU, did no harm on ONNX Runtime's CPU provider, nor with every node evaluated in IEEE fp16 (numpy); GPU kernels were not tested.
-- No aarch64 build or run, so nothing on Jetson either: everything here ran on x86-64 with GCC 13. The aarch64 branch of `fetch_onnxruntime.sh` is untested.
+- The guard against a fused multiply-add in the Euler update (`Contract.EulerUpdateRoundsTheProductSeparately`, for the build's `-ffp-contract=off`) can only fail where the compiler may emit FMA instructions: aarch64, as on Jetson, or x86-64 built with `-march=native` on a CPU that has them. The default x86-64 target has no FMA, so on this VM and on the CI runner the test would pass without the flag too. The Jetson is aarch64, but the C++ unit tests were not built there.
+- No GPU latency that says anything about SmolVLA. The numbers in this section come from random weights. Real weights were checked on the CPU only, in [Real weights (CPU)](#real-weights-cpu). There the fp16 `vision` graph's attention scores stayed within ±48. The only overflow, inside the vision tower's GELU, did no harm on ONNX Runtime's CPU provider, nor with every node evaluated in IEEE fp16 (numpy); GPU kernels were not tested.
+- The aarch64 branch of `fetch_onnxruntime.sh`, and ONNX Runtime on aarch64. Everything in this section ran on x86-64 with GCC 13; the only aarch64 run is below.
+
+## Jetson Xavier NX (TensorRT 8.5)
+
+A Xavier NX stays on JetPack 5: TensorRT 8.5.2, CUDA 11.4, Ubuntu 20.04. NVIDIA says JetPack 6 does not support Xavier, and TensorRT 10 targets Turing and newer, while this GPU is Volta (`sm_72`). So `export_split.py --for-tensorrt85` writes graphs for it:
+
+```bash
+$PY export_split.py --policy lerobot/smolvla_libero --out-dir onnx_split --precisions fp32 --for-tensorrt85   # on a PC
+$PY tools/dump_bundle.py --policy lerobot/smolvla_libero --out onnx_split/bundle.bin
+# On the Jetson, for each of vision, prefix and expert_step:
+/usr/src/tensorrt/bin/trtexec --onnx=onnx_split/prefix_fp32.onnx --noTF32 --saveEngine=onnx_split/prefix_fp32.engine
+```
+
+The flag changes two things. TensorRT 8.5 cannot import `LayerNormalization`, so it is written as basic ops, its statistics in fp32. And the graphs are really opset 17:
+
+- **Opset 18 builds and runs, and gives wrong numbers.** TensorRT 8.5's parser accepts an opset 18 `ReduceMean` without an error but ignores its axes input and averages over every axis, so every RMSNorm is wrong. On the tiny model the action chunk moved by 0.18 and the prefix K/V by 1.1. Only the parity check showed it.
+- **`--opset 17` alone used to leave two of the graphs at 18.** ONNX's version converter fails on `prefix` and `expert_step`, and torch.onnx only logs that. `export_split.py` now lowers them itself and refuses any graph that comes out at another opset than the one asked for.
+
+`lang_tokens` is int32 in these engines, since TensorRT 8.5 has no int64; `SmolVLARuntime` narrows it.
+
+**Measured** with `smolvla_rt_bench --backend trt`, on the tiny random test policy (2 key/value heads): GCC 9.4, TensorRT 8.5.2, the fp32 engines built with `--noTF32`, against LeRobot's fp32 on an x86-64 CPU. The report is [`results/jetson_xavier_nx_trt85_tiny_fp32.json`](results/jetson_xavier_nx_trt85_tiny_fp32.json).
+
+| Check | Max abs | Cosine |
+|---|---|---|
+| fp32 action chunk vs `predict_action_chunk` | 1.6e-6 | 0.9999999999998 |
+| Image tokens | 3.5e-6 | 0.9999999999997 |
+| Prefix K/V | 1.4e-5 | 0.9999999999984 |
+| `v_t`, 10 steps | 1.1e-5 | 0.9999999999922 |
+
+The pad mask was equal, a rerun was identical and nothing was non-finite. The engine builds took 22, 107 and 120 s for `vision`, `prefix` and `expert_step`.
+
+**Not tested on the Jetson**
+- Real weights or full-size graphs, so there is no latency that says anything about SmolVLA here: the tiny model's chunk took 46 ms, on a board also running other containers, with no fixed clocks.
+- fp16. A default `trtexec --fp16` build chooses each layer's precision itself. Built from graphs that were still opset 18, it put the expert's time embedding and RoPE sin/cos in fp16 and clamped the masks' fill value to fp16's range, against the [conditions](#real-weights-cpu) for fp16 here. TensorRT 8.5 has no strongly typed mode; `--precisionConstraints` and `--layerPrecisions` may pin those layers, untried.
+- The CMake build: JetPack's apt offers CMake 3.16, and `cpp/CMakeLists.txt` needs 3.18. This run compiled `cpp/src` (without `ort_graph.cpp`) and `cpp/tools/bench.cpp` with g++ directly, with `-ffp-contract=off`, and linked `-lnvinfer -lcudart`. The C++ unit tests and ONNX Runtime did not run there.
 
 ## Real weights (CPU)
 
@@ -256,7 +290,7 @@ Against that reference, worst case over the 16 frames, in normalised action spac
 CPU latency on one thread, p50: a chunk takes 9.4 s in PyTorch fp32, 10.1 s with the fp32 split graphs from Python and 9.95 s from C++. bf16 and fp16 are slower on this CPU, which has no arithmetic for either: PyTorch bf16 24.6 s, PyTorch fp16 64.7 s, fp16 graphs 11.2 to 12.1 s. These say nothing about a GPU.
 
 **Not tested:**
-- any GPU, and TensorRT engines;
+- any GPU, and TensorRT engines, with these weights;
 - whether TensorRT keeps the LayerNorm statistics and the other fp32-typed tensors in fp32, in particular in a weakly typed build (`trt_vision.py --mode fp16-flag`), where the builder chooses each layer's precision;
 - how TensorRT or a fused GPU GELU kernel treats the GELU's infinite intermediate;
 - other checkpoints, more frames, and closed-loop success.

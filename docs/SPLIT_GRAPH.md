@@ -49,6 +49,7 @@ All shapes are static and the batch size is 1. Sizes below use the names in `spl
 - `torch.onnx.export(dynamo=True)`, i.e. torch.export plus onnxscript.
 - Opset 18, IR version 10, within what ONNX Runtime and the TensorRT 10 parser support; `--opset` changes it.
 - The TorchScript exporter is not offered: under transformers 5.5 it fails inside the SigLIP attention-mask code.
+- `--for-tensorrt85` writes opset 17, with `LayerNormalization` as basic ops, for TensorRT 8.5 on JetPack 5. See [TensorRT 8.5](#tensorrt-85).
 
 **Weights**
 - Every graph stores its weights in one external-data file, whatever its size.
@@ -162,7 +163,7 @@ LeRobot's saved preprocessors pad to the longest sequence instead (`pad_language
 | `pixel_values`, `image_tokens`, `past_key_*`, `past_value_*` | fp32 | fp16 |
 | `state`, `x_t`, `t`, `v_t` | fp32 | fp32 |
 
-The fp16 graphs are strongly typed. The weights are cast in PyTorch before export, the profiler's `fp16all` layout, so every cast is explicit in the graph. TensorRT should build them with `STRONGLY_TYPED` and no FP16 builder flag, which TensorRT 11 removes. That is the path `trt_vision.py` takes for the vision graph. No TensorRT engine has been built from any of these graphs yet: the test machine has no GPU.
+The fp16 graphs are strongly typed. The weights are cast in PyTorch before export, the profiler's `fp16all` layout, so every cast is explicit in the graph. TensorRT should build them with `STRONGLY_TYPED` and no FP16 builder flag, which TensorRT 11 removes. That is the path `trt_vision.py` takes for the vision graph. No TensorRT engine has been built from the fp16 graphs in strongly typed mode yet.
 
 ## What differs from LeRobot's code, and why
 
@@ -183,6 +184,15 @@ The wrappers in `smolvla_latency/split_graph.py` call LeRobot's own `embed_prefi
    - In PyTorch it is bit-identical to LeRobot's `apply_rope`.
 
 The tests check each one against LeRobot.
+
+### TensorRT 8.5
+
+`--for-tensorrt85` changes the graphs after export, in `smolvla_latency/onnx_rewrite.py`, and the export's parity check then runs on the changed graphs:
+
+1. **Opset 17.** TensorRT 8.5's parser accepts an opset 18 `ReduceMean` without an error, ignores its axes input and averages over every axis, so the engine gives wrong numbers. ONNX's version converter fails on `prefix` and `expert_step`, and torch.onnx only logs that, so `lower_to_opset17` moves the `Reduce*` axes to attributes and drops `Split`'s `num_outputs`. It refuses any other operator that changed at opset 18. `export_split.py` refuses a graph that comes out at another opset than the one asked for.
+2. **`LayerNormalization` as basic ops**, which TensorRT 8.5 cannot import. `decompose_layer_norm` keeps the statistics in fp32, as `stash_type` 1 says, with explicit Casts in an fp16 graph.
+
+In a TensorRT 8.5 engine `lang_tokens` is int32, since it has no int64. `SmolVLARuntime` accepts that and narrows the ids; manifests and bundles stay int64.
 
 **Not supported** (the export raises `NotImplementedError` naming the setting):
 - `empty_cameras > 0` or masked cameras;
@@ -284,7 +294,7 @@ The test asserts each fp32 graph at 1e-4 and the fp32 chunk at 1e-5. fp16 is rep
 Inputs and outputs had the shapes in the tables above, with `D = 960`, `Hkv = 5` and `Dh = 64`.
 
 **Not tested here**
-- TensorRT engines built from these graphs; there is no GPU on the test machine.
+- TensorRT engines at full size. The tiny model's fp32 engines ran on a Jetson Xavier NX with TensorRT 8.5.2; see the README's "Jetson Xavier NX" section.
 - ONNX Runtime's CUDA execution provider.
 - Real checkpoint weights on a GPU. On the CPU, see the next section.
 
