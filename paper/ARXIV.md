@@ -15,7 +15,7 @@ bash paper/make_arxiv.sh     # writes paper/dist/smolvla-edge-arxiv.tar.gz
 
 It contains `main.tex`, `main.bbl`, `refs.bib` and the five figure PDFs. arXiv compiles with pdfLaTeX and doesn't run BibTeX, which is why `main.bbl` must be included; `refs.bib` comes along so the source also builds where BibTeX does run. Rebuild the package after any change to `main.tex` or `refs.bib`; the script refuses a stale `main.bbl`.
 
-On arXiv's upload page, add the `.tar.gz` file whole; arXiv unpacks it. Then check the PDF arXiv builds before you submit. It uses Times where the local tectonic build used TeX Gyre Termes, a Times clone, so the pages should match.
+On arXiv's upload page, add the `.tar.gz` file whole; arXiv unpacks it. The script also writes the same files as `dist/smolvla-edge-source.zip`, for servers that take only zip, such as Preprints.org. Then check the PDF arXiv builds before you submit. It uses Times where the local tectonic build used TeX Gyre Termes, a Times clone, so the pages should match.
 
 ## The form
 

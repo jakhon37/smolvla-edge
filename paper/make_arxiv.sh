@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Builds dist/smolvla-edge-arxiv.tar.gz, the files arXiv needs: main.tex, main.bbl and the figures main.tex uses.
+# Builds dist/smolvla-edge-arxiv.tar.gz (and the same as dist/smolvla-edge-source.zip), the files arXiv needs: main.tex, main.bbl and the figures main.tex uses.
 # arXiv compiles with pdfLaTeX and does not run BibTeX, so main.bbl must come from a build of this main.tex.
 # refs.bib comes along too, so that the source also builds where BibTeX does run (tectonic always runs it).
 #
@@ -20,4 +20,6 @@ grep -o '\\includegraphics\(\[[^]]*\]\)\?{[^}]*}' main.tex | sed 's/.*{\(.*\)}/\
   cp "figures/$f.pdf" dist/src/figures/
 done
 tar -C dist/src -czf dist/smolvla-edge-arxiv.tar.gz .
+(cd dist/src && python3 -m zipfile -c ../smolvla-edge-source.zip main.tex main.bbl refs.bib figures)  # Preprints.org: zip only
 tar -tzvf dist/smolvla-edge-arxiv.tar.gz
+python3 -m zipfile -l dist/smolvla-edge-source.zip
