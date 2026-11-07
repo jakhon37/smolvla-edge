@@ -2,6 +2,8 @@
 
 #include <NvInferRuntime.h>
 #include <NvInferVersion.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <cstdio>
@@ -78,6 +80,12 @@ TrtGraph::TrtGraph(const std::string& engine_path, int device) : impl_(std::make
   in.seekg(0);
   if (!in.read(blob.data(), static_cast<std::streamsize>(blob.size()))) {
     throw std::runtime_error("cannot read " + engine_path);
+  }
+  // On a Jetson, CUDA memory comes from nvmap, which does not reclaim the page cache, so an engine left in the
+  // cache can make the next engine's allocation fail.
+  if (const int fd = open(engine_path.c_str(), O_RDONLY); fd >= 0) {
+    posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED);
+    close(fd);
   }
 
   detail::check_cuda(cudaSetDevice(device), "cudaSetDevice");

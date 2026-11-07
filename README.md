@@ -17,7 +17,7 @@ The study then:
 - reports latency (p50/p90/p99) and the action-chunk error against fp32;
 - exports the vision encoder to ONNX and TensorRT, checking parity before claiming any speed-up.
 
-Status: tooling complete and smoke-tested offline on CPU. Checked on the CPU with the real `lerobot/smolvla_libero` weights and LIBERO frames: see [Real weights (CPU)](#real-weights-cpu). The fp32 path also runs on a Jetson Xavier NX GPU, so far with the tiny random test model only: see [Jetson Xavier NX](#jetson-xavier-nx-tensorrt-85). GPU numbers with real weights are pending.
+Status: tooling complete and smoke-tested offline on CPU. Checked on the CPU with the real `lerobot/smolvla_libero` weights and LIBERO frames: see [Real weights (CPU)](#real-weights-cpu). The fp32 path also runs on a Jetson Xavier NX GPU with those weights and frames, at about 1.0 s per chunk: see [Jetson Xavier NX](#jetson-xavier-nx-tensorrt-85). fp16 on a GPU is pending.
 
 ## What the code says before any measurement (LeRobot 0.6.1, transformers 5.5)
 
@@ -220,7 +220,7 @@ Control-loop harness: 10k ticks at 50 Hz on the same model (`--threads 1`), with
 - The real CUDA calls behind `CudaDevice` (`cpp/src/cuda_api.cpp`) ran on the Jetson, on CUDA 11.4. They were linked against CUDA 12.9's `libcudart` too, but there only the "no CUDA driver" error path ran.
 - ONNX Runtime's CUDA execution provider: the SDK used here is CPU-only. With it, `OrtGraph` keeps buffers in host memory, so ONNX Runtime copies the prefix K/V to the GPU on every expert step; `TrtGraph` keeps them on the device.
 - The guard against a fused multiply-add in the Euler update (`Contract.EulerUpdateRoundsTheProductSeparately`, for the build's `-ffp-contract=off`) can only fail where the compiler may emit FMA instructions: aarch64, as on Jetson, or x86-64 built with `-march=native` on a CPU that has them. The default x86-64 target has no FMA, so on this VM and on the CI runner the test would pass without the flag too. The Jetson is aarch64, but the C++ unit tests were not built there.
-- No GPU latency that says anything about SmolVLA. The numbers in this section come from random weights. Real weights were checked on the CPU only, in [Real weights (CPU)](#real-weights-cpu). There the fp16 `vision` graph's attention scores stayed within ±48. The only overflow, inside the vision tower's GELU, did no harm on ONNX Runtime's CPU provider, nor with every node evaluated in IEEE fp16 (numpy); GPU kernels were not tested.
+- GPU latency that says anything about SmolVLA, other than fp32 on the [Xavier NX](#jetson-xavier-nx-tensorrt-85). The numbers in this section come from random weights. Real weights in fp16 were checked on the CPU only, in [Real weights (CPU)](#real-weights-cpu). There the fp16 `vision` graph's attention scores stayed within ±48. The only overflow, inside the vision tower's GELU, did no harm on ONNX Runtime's CPU provider, nor with every node evaluated in IEEE fp16 (numpy); GPU kernels were not tested.
 - The aarch64 branch of `fetch_onnxruntime.sh`, and ONNX Runtime on aarch64. Everything in this section ran on x86-64 with GCC 13; the only aarch64 run is below.
 
 ## Jetson Xavier NX (TensorRT 8.5)
@@ -230,8 +230,8 @@ A Xavier NX stays on JetPack 5: TensorRT 8.5.2, CUDA 11.4, Ubuntu 20.04. NVIDIA 
 ```bash
 $PY export_split.py --policy lerobot/smolvla_libero --out-dir onnx_split --precisions fp32 --for-tensorrt85   # on a PC
 $PY tools/dump_bundle.py --policy lerobot/smolvla_libero --out onnx_split/bundle.bin
-# On the Jetson, for each of vision, prefix and expert_step:
-/usr/src/tensorrt/bin/trtexec --onnx=onnx_split/prefix_fp32.onnx --noTF32 --saveEngine=onnx_split/prefix_fp32.engine
+# On the Jetson, for each of vision, prefix and expert_step (real weights need the memory steps below):
+/usr/src/tensorrt/bin/trtexec --onnx=onnx_split/prefix_fp32.onnx --noTF32 --buildOnly --saveEngine=onnx_split/prefix_fp32.engine
 ```
 
 The flag changes two things. TensorRT 8.5 cannot import `LayerNormalization`, so it is written as basic ops, its statistics in fp32. And the graphs are really opset 17:
@@ -241,7 +241,40 @@ The flag changes two things. TensorRT 8.5 cannot import `LayerNormalization`, so
 
 `lang_tokens` is int32 in these engines, since TensorRT 8.5 has no int64; `SmolVLARuntime` narrows it.
 
-**Measured** with `smolvla_rt_bench --backend trt`, on the tiny random test policy (2 key/value heads): GCC 9.4, TensorRT 8.5.2, the fp32 engines built with `--noTF32`, against LeRobot's fp32 on an x86-64 CPU. The report is [`results/jetson_xavier_nx_trt85_tiny_fp32.json`](results/jetson_xavier_nx_trt85_tiny_fp32.json).
+**Real weights.** `lerobot/smolvla_libero` at `a24f1f3`, on the 16 LIBERO frames of [Real weights (CPU)](#real-weights-cpu), same hashes, and on the synthetic observation. `smolvla_rt_bench --backend trt`: GCC 9.4, TensorRT 8.5.2, fp32 engines built with `--noTF32`, against LeRobot's fp32 on an x86-64 CPU. The report is [`results/jetson_xavier_nx_trt85_real_fp32.json`](results/jetson_xavier_nx_trt85_real_fp32.json).
+
+| Worst over the 16 frames | Max abs | Relative L2 |
+|---|---|---|
+| fp32 action chunk vs `predict_action_chunk` (gate 1e-4) | 1.6e-5 | |
+| Image tokens, which reach 245 | 2.9e-4 | 1.9e-6 |
+| Prefix K/V | 1.2e-4 | 2.3e-6 |
+| `v_t`, 10 steps | 5.6e-4 | 7.1e-6 |
+
+The smallest chunk cosine was 0.999999999996. The pad mask was equal, each rerun was identical and nothing was non-finite. On the CPU the same frames gave 6.3e-6 with ONNX Runtime.
+
+| 50 chunks after 5 warm-up, p50 (p99), frame 0 | ms |
+|---|---|
+| Action chunk | 1003 (1020) |
+| Vision, per camera | 326 (342) |
+| VLM prefix | 88 (98) |
+| Action expert, per step | 25.9 (26.4) |
+
+- **Where the time goes.** Vision takes 65% of a chunk, the 10 expert steps 26% and the prefix 9%. The synthetic observation gave 997 ms.
+- **Conditions.** 20 W mode, default clock governor with the GPU at its top 1109 MHz right after the run, about a minute of load (59.5 °C at the end). The desktop was off and no live robot stack ran, so this is neither sustained nor loaded latency. With the desktop on, frame 0 gave the same 4.05e-6 and 999 ms.
+- **Memory.** The process peaked at about 4.4 GB. That left 1.6 GB available with the desktop off and 750 MB with it on, little room for a robot stack beside it.
+- **Page cache.** CUDA memory on this board comes from nvmap, which does not reclaim the page cache. `TrtGraph` therefore drops each engine file from the cache after reading it. Without that, the third engine failed to load with the desktop on, with 1.3 GB shown available.
+
+**Building the engines takes most of the board's memory.** The `prefix` engine's workspace grows to 1 GiB. With the desktop on, that allocation fails, with 1.1 to 1.5 GB shown available, and `--memPoolSize=workspace:N` and removing tactics did not change it. It built with the desktop off and the file cache dropped, peaking at 4.9 GB and leaving 1.2 GB available:
+
+```bash
+sudo systemctl stop gdm3 nxserver; sync; sudo sh -c "echo 3 > /proc/sys/vm/drop_caches"
+# build the engines; afterwards:
+sudo systemctl start nxserver gdm3
+```
+
+`cudaMalloc` failed there with 1.8 GB shown available, most of it file cache, so drop the cache before a build. `vision` and `expert_step`, with a 512 MiB workspace, built with the desktop on once the cache was out. The engines took 65, 143 and 153 s for `vision`, `prefix` and `expert_step`.
+
+**Tiny model.** The same flow on the tiny random test policy (2 key/value heads). The report is [`results/jetson_xavier_nx_trt85_tiny_fp32.json`](results/jetson_xavier_nx_trt85_tiny_fp32.json).
 
 | Check | Max abs | Cosine |
 |---|---|---|
@@ -253,7 +286,7 @@ The flag changes two things. TensorRT 8.5 cannot import `LayerNormalization`, so
 The pad mask was equal, a rerun was identical and nothing was non-finite. The engine builds took 22, 107 and 120 s for `vision`, `prefix` and `expert_step`.
 
 **Not tested on the Jetson**
-- Real weights or full-size graphs, so there is no latency that says anything about SmolVLA here: the tiny model's chunk took 46 ms, on a board also running other containers, with no fixed clocks.
+- Sustained load, pinned clocks, or the policy running beside a live robot stack on the same board.
 - fp16. A default `trtexec --fp16` build chooses each layer's precision itself. Built from graphs that were still opset 18, it put the expert's time embedding and RoPE sin/cos in fp16 and clamped the masks' fill value to fp16's range, against the [conditions](#real-weights-cpu) for fp16 here. TensorRT 8.5 has no strongly typed mode; `--precisionConstraints` and `--layerPrecisions` may pin those layers, untried.
 - The CMake build: JetPack's apt offers CMake 3.16, and `cpp/CMakeLists.txt` needs 3.18. This run compiled `cpp/src` (without `ort_graph.cpp`) and `cpp/tools/bench.cpp` with g++ directly, with `-ffp-contract=off`, and linked `-lnvinfer -lcudart`. The C++ unit tests and ONNX Runtime did not run there.
 
@@ -290,7 +323,7 @@ Against that reference, worst case over the 16 frames, in normalised action spac
 CPU latency on one thread, p50: a chunk takes 9.4 s in PyTorch fp32, 10.1 s with the fp32 split graphs from Python and 9.95 s from C++. bf16 and fp16 are slower on this CPU, which has no arithmetic for either: PyTorch bf16 24.6 s, PyTorch fp16 64.7 s, fp16 graphs 11.2 to 12.1 s. These say nothing about a GPU.
 
 **Not tested:**
-- any GPU, and TensorRT engines, with these weights;
+- fp16 on any GPU, and any GPU but the Xavier NX, where [fp32 engines ran](#jetson-xavier-nx-tensorrt-85);
 - whether TensorRT keeps the LayerNorm statistics and the other fp32-typed tensors in fp32, in particular in a weakly typed build (`trt_vision.py --mode fp16-flag`), where the builder chooses each layer's precision;
 - how TensorRT or a fused GPU GELU kernel treats the GELU's infinite intermediate;
 - other checkpoints, more frames, and closed-loop success.

@@ -194,6 +194,8 @@ The tests check each one against LeRobot.
 
 In a TensorRT 8.5 engine `lang_tokens` is int32, since it has no int64. `SmolVLARuntime` accepts that and narrows the ids; manifests and bundles stay int64.
 
+With the real weights these fp32 graphs match LeRobot's chunk to 1.6e-5 on 16 LIBERO frames, on a Xavier NX GPU. Building the `prefix` engine takes most of that board's memory: see [the README](../README.md#jetson-xavier-nx-tensorrt-85).
+
 **Not supported** (the export raises `NotImplementedError` naming the setting):
 - `empty_cameras > 0` or masked cameras;
 - `adapt_to_pi_aloha`;
