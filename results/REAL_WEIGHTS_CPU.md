@@ -104,7 +104,7 @@ ONNX Runtime's CPU provider has no fp16 kernels for most of these nodes:
 | `fp16vlm` | 4 | 2.9e-3 | 0.9999998 | 0 |
 | `fp16all`, the fp16 graphs' layout | 4 | 2.9e-3 | 0.9999998 | 0 |
 | `amp`, fp16 autocast over fp32 weights | 4 | 2.9e-3 | 0.99999975 | 0 |
-| `lerobot_amp` | 0 | fails: `RuntimeError: mixed dtype (CPU)`, as the README says for the CPU | | |
+| `lerobot_amp` | 0 | fails: `RuntimeError: mixed dtype (CPU)`, as [the variants table](../docs/PRECISION.md#variants) says for the CPU | | |
 
 - The variants that compute in fp16 ran on frames 1, 5, 9 and 13 only, one per episode, without warm-up, because on this CPU an fp16 chunk takes about 7 times as long as an fp32 one (see below).
 - **bf16, which LeRobot itself runs for this checkpoint, moves the chunk 4 to 11 times as far as `fp16all` does** on the four frames where both ran: up to 0.020 std (`lerobot`), against 0.0029 (`fp16all`). Against `fp16vlm` and `amp` the ratio reaches 15 and 12. Over all 16 frames bf16 reaches 0.049.

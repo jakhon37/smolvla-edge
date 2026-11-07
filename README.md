@@ -1,394 +1,94 @@
 # smolvla-edge
 
-Where does [SmolVLA](https://huggingface.co/papers/2506.01844)'s time go on a small GPU, and what do lower precisions and TensorRT buy without changing its actions?
+[![CI](https://github.com/jakhon37/smolvla-edge/actions/workflows/ci.yml/badge.svg)](https://github.com/jakhon37/smolvla-edge/actions/workflows/ci.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-SmolVLA is Hugging Face's 450M-parameter vision-language-action policy in [LeRobot](https://github.com/huggingface/lerobot). This repo measures one action-chunk call at batch size 1, split into components:
+**Hugging Face's SmolVLA robot policy on a Jetson, three times faster, without changing what it does.**
 
-| Component | What it is |
-|---|---|
-| Vision encoder | SigLIP tower + connector, once per camera |
-| VLM prefix | 16 SmolVLM layers over image, language and state tokens; fills the KV cache |
-| Action expert | 10 flow-matching steps of the smaller expert transformer reading that cache |
-| Pre/post-processing | tokenise, normalise, resize-with-pad, unnormalise |
-| Other glue | masks, Euler updates, Python overhead |
+[SmolVLA](https://huggingface.co/papers/2506.01844) is the 450M-parameter vision-language-action policy in [LeRobot](https://github.com/huggingface/lerobot): camera images, a task sentence and the robot's state in, a chunk of 50 actions out. This repo splits it into three ONNX graphs, runs them from C++ on ONNX Runtime or TensorRT, and checks every stage against LeRobot's own fp32 before claiming any speed-up. On a Jetson Xavier NX one action chunk takes 1.0 s in fp32 and 0.33 s in fp16.
 
-The study then:
-- runs each precision variant on the same observation and the same flow-matching noise;
-- reports latency (p50/p90/p99) and the action-chunk error against fp32;
-- exports the vision encoder to ONNX and TensorRT, checking parity before claiming any speed-up.
+The question behind it: where does SmolVLA's time go on a small GPU, and what do lower precisions and TensorRT buy without changing its actions?
 
-Status: tooling complete and smoke-tested offline on CPU. Checked on the CPU with the real `lerobot/smolvla_libero` weights and LIBERO frames: see [Real weights (CPU)](#real-weights-cpu). On a Jetson Xavier NX GPU with those weights and frames, a chunk takes about 1.0 s in fp32 and 0.33 s in fp16, once TensorRT is made to keep the graphs' fp32 parts: see [Jetson Xavier NX](#jetson-xavier-nx-tensorrt-85).
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/figures/overview-dark.svg">
+  <img alt="SmolVLA exported as three graphs, built into engines, run by a C++ loop, and checked against LeRobot's fp32 at every split point" src="docs/figures/overview.svg">
+</picture>
 
-## What the code says before any measurement (LeRobot 0.6.1, transformers 5.5)
+## Results
 
-These come from the source, not from measurement.
-- `tests/check_lerobot_dtypes.py` confirms the dtype layout against LeRobot itself: same per-parameter dtypes, and bit-identical actions on a test model.
-- The dtype rules depend on `load_vlm_weights`. LeRobot's LIBERO, Meta-World and RoboCasa training commands pass `true`, so fine-tuned checkpoints usually save it.
+Real [`lerobot/smolvla_libero`](https://huggingface.co/lerobot/smolvla_libero) weights on 16 frames of the LIBERO dataset it was trained on, against LeRobot's own `predict_action_chunk` with the same inputs and noise.
 
-1. **With `load_vlm_weights=true`, the VLM runs in bf16.**
-   - `SmolVLMWithExpertModel` first loads the base VLM with `torch_dtype="bfloat16"` ([smolvlm_with_expert.py#L90-L96](https://github.com/huggingface/lerobot/blob/v0.6.1/src/lerobot/policies/smolvla/smolvlm_with_expert.py#L90-L96)).
-   - The checkpoint is then copied into those bf16 parameters.
-2. **The action expert follows the VLM into bf16, with one exception.**
-   - It is built from a copy of the VLM's text config. Under transformers 5, `from_config` uses that config's dtype, so the expert is bf16 too.
-   - The exception: the cross-attention layers' `k_proj`/`v_proj` are replaced with plain `nn.Linear` after construction, so they stay fp32.
-3. **The small projections are always fp32.** `state_proj`, `action_in_proj`, `action_out_proj` and the time MLP are fp32, and `denoise_step` casts to fp32 before `action_out_proj`.
-   - A plain `policy.half()` therefore crashes.
-   - The variants below cast only the VLM and the expert.
-4. **`lerobot-eval` sets some global flags.** It always sets `cudnn.benchmark=True` and TF32 matmul. With `--policy.use_amp=true` it adds fp16 autocast, which on such checkpoints runs over the bf16 weights.
-5. **On Turing (T4), bf16 has no hardware support.** On compute capability 7.5, `torch.cuda.is_bf16_supported(including_emulation=False)` is `False`. How much the bf16 VLM and expert cost there is the first thing this repo measures.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/figures/jetson_latency-dark.svg">
+  <img alt="One action chunk on a Jetson Xavier NX: 1003 ms in fp32, 327 ms in fp16" src="docs/figures/jetson_latency.svg">
+</picture>
 
-## Variants
+| Jetson Xavier NX, TensorRT 8.5.2 | fp32 | fp16 |
+|---|---|---|
+| Action chunk, p50 on frame 0 | 1003 ms | 327 ms |
+| Chunk error vs LeRobot's fp32, worst of 16 frames, in action std | 1.6e-5 | 0.060 |
+| Peak memory of a run | 4.4 GB | 2.7 GB |
 
-| Name | VLM | Expert | Note |
-|---|---|---|---|
-| `fp32` | fp32 | fp32 | Reference for parity. Strict fp32: TF32 off |
-| `lerobot` | bf16 | bf16, cross-attn k/v fp32 | What `lerobot-eval` runs for a `load_vlm_weights=true` checkpoint, with its backend flags |
-| `lerobot_amp` | same | same | Plus fp16 autocast (`--policy.use_amp=true`). CUDA only: on CPU, autocast leaves the bf16 LayerNorm weights uncast |
-| `bf16vlm` | bf16 | fp32 | Not a layout LeRobot builds |
-| `fp16vlm` | fp16 | fp32 | |
-| `fp16all` | fp16 | fp16 | |
-| `bf16all` | bf16 | bf16 | Opt-in. Everything bf16, including cross-attn k/v |
-| `amp` | fp32 + autocast fp16 | fp32 + autocast fp16 | `use_amp` on a `load_vlm_weights=false` checkpoint, without LeRobot's backend flags |
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/figures/precision_accuracy-dark.svg">
+  <img alt="Chunk error per frame for each precision: fp32 near 1e-5, fp16 on the CPU near 1e-3, fp16 on TensorRT with pinned layers and LeRobot's bf16 near 1e-2, plain fp16 on TensorRT near 2" src="docs/figures/precision_accuracy.svg">
+</picture>
 
-## Run it
+fp16 on the Jetson lands in the range of the bf16 that LeRobot itself runs this checkpoint in, but only once TensorRT is held to the graphs' fp32 parts. Every experiment and number: [Experiments and results](docs/EXPERIMENTS.md).
 
-### On a GPU machine (lab server, Colab, Kaggle)
+## What I found
+
+1. **TensorRT 8.5's `--fp16` returns wrong actions, silently.** It has no strongly typed mode, and its fused kernels compute in fp16 what the graph keeps in fp32. The engines build and run, and their actions are unrelated to LeRobot's, with a cosine as low as -0.13. Pinning every layer the graph types as fp32 fixes it for 2.5% of the speed. → [Jetson](docs/JETSON.md#fp16-with-the-real-weights)
+2. **An opset 18 graph builds, runs, and is wrong on TensorRT 8.5.** Its parser ignores `ReduceMean`'s axes input and averages every RMSNorm over every axis: on the tiny model the chunk moved by 0.18, with no error. torch.onnx, asked for opset 17, had quietly kept two graphs at 18. → [Jetson](docs/JETSON.md#what---for-tensorrt85-changes)
+3. **LeRobot runs this checkpoint in bf16, not fp32.** The code decides it, through `load_vlm_weights`, and bf16 moves the actions 4 to 11 times as far as fp16 does on the same frames. → [Precision](docs/PRECISION.md)
+4. **A K/V layout bug is invisible with one key/value head.** Reading the cache as `[P, Hkv, Dh]` instead of `[Hkv, P, Dh]` moved the chunk by 0.24 with two heads, and not at all with one. Every parity test runs a two-head model. → [C++ runtime](docs/CPP_RUNTIME.md)
+5. **On a Jetson, "available" memory is not available to CUDA.** CUDA memory comes from nvmap, which does not reclaim the page cache, so the third engine failed to load with 1.3 GB shown available. The runtime now drops each engine file from the cache once read. → [Jetson](docs/JETSON.md#fp32-with-the-real-weights)
+6. **The C++ runtime matches PyTorch to 4.8e-7** and kept a 50 Hz control loop fed for 10,000 ticks without one going empty (tiny model, CPU). → [C++ runtime](docs/CPP_RUNTIME.md)
+
+## How it works
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/figures/data_flow-dark.svg">
+  <img alt="One action chunk: vision once per camera, prefix once to fill the K/V cache, then expert_step ten times in an Euler loop" src="docs/figures/data_flow.svg">
+</picture>
+
+`vision` runs once per camera, `prefix` once to fill the K/V cache, and `expert_step` ten times in the flow-matching loop, which stays in C++. Each split point is also a checkpoint: image tokens, K/V, every velocity and the chunk are compared with LeRobot's. [How it works](docs/HOW_IT_WORKS.md) walks through it; [the contract](docs/SPLIT_GRAPH.md) pins every tensor.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/figures/architecture-dark.svg">
+  <img alt="System structure: Python export and reference tools write the contract; the C++ runtime reads it and runs on CPU, GPU or Jetson" src="docs/figures/architecture.svg">
+</picture>
+
+## Quickstart
+
+No GPU and no Hugging Face Hub access needed: a tiny random model checks the export and the runtime against LeRobot.
 
 ```bash
 git clone https://github.com/jakhon37/smolvla-edge && cd smolvla-edge
-bash scripts/setup_env.sh                 # Python 3.12 venv in ~/venvs/smolvla: torch cu128, LeRobot 0.6.1, TensorRT 10.16
-bash scripts/run_p0.sh                    # env check, profile, ONNX export, TensorRT fp16 + fp32
+WITH_TRT=0 bash scripts/setup_env.sh                  # Python 3.12 venv in ~/venvs/smolvla, LeRobot 0.6.1
+bash tests/smoke_test.sh ~/venvs/smolvla/bin/python   # tiny random model, offline
+~/venvs/smolvla/bin/python -m pytest tests            # split-graph parity against LeRobot
 ```
 
-Everything lands in `results/<gpu>_<utc>/`:
+On a GPU, `bash scripts/setup_env.sh && bash scripts/run_p0.sh` profiles every precision variant and builds TensorRT engines of the vision encoder: see [Getting started](docs/GETTING_STARTED.md). On a Jetson, follow [the step-by-step guide](docs/JETSON.md#step-by-step).
 
-| File | Contents |
+## Documentation
+
+| Guide | What is in it |
 |---|---|
-| `env_check.txt` | Machine, driver, bf16 support, headless MuJoCo rendering |
-| `profile.json` | Full per-component and per-variant results |
-| `breakdown.png`, `breakdown.svg`, `breakdown.md` | Chart plus the same numbers as a table |
-| `onnx/export_report.json` | ONNX export and ONNX Runtime parity |
-| `onnx/trt_report_*.json` | TensorRT build, parity and latency vs PyTorch |
-
-On a shared server:
-- Pick an idle GPU first, e.g. `CUDA_VISIBLE_DEVICES=1 bash scripts/run_p0.sh`.
-- Another job on the same GPU shows up in p99.
-- `setup_env.sh` picks cu126 torch wheels for GPUs below compute capability 7.5 (P100, V100), because the cu128 wheels do not cover them. TensorRT 10 targets Turing and newer, so on such GPUs only the PyTorch profile applies.
-
-On Kaggle: turn on internet and a GPU, then run [`notebooks/kaggle_p0.ipynb`](notebooks/kaggle_p0.ipynb). It puts the venv in `/tmp`, so it doesn't count against the 20 GB output limit.
-
-### Individual steps
-
-```bash
-PY=~/venvs/smolvla/bin/python
-$PY profile_smolvla.py --policy lerobot/smolvla_libero --iters 1000   # default: fp32,lerobot,lerobot_amp,bf16vlm,fp16vlm,fp16all,amp
-$PY export_vision.py   --policy lerobot/smolvla_libero --out-dir onnx
-$PY trt_vision.py      --onnx onnx/vision_fp16.onnx --torch-baseline      # strongly typed FP16 (TensorRT 10 and 11)
-$PY trt_vision.py      --onnx onnx/vision_fp32.onnx --mode fp16-flag       # weakly typed FP16, TensorRT 10 only
-$PY plot_results.py    results/*/profile.json --out results/compare        # several GPUs on one chart
-```
-
-### Offline smoke test (no GPU, no Hub)
-
-```bash
-bash tests/smoke_test.sh ~/venvs/smolvla/bin/python          # tiny random model, a few minutes
-bash tests/smoke_test.sh ~/venvs/smolvla/bin/python --full   # SmolVLM2-500M layer sizes, about 5-6 GB RAM
-~/venvs/smolvla/bin/python -m pytest tests                   # split-graph parity tests, tiny model, about 3 minutes
-bash tests/cpp_parity.sh ~/venvs/smolvla/bin/python          # C++ runtime vs PyTorch, tiny model, a few minutes
-```
-
-GitHub Actions runs the first, third and fourth on a CPU runner for every push ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)).
-
-## Split-graph export
-
-`export_split.py` exports SmolVLA as three ONNX graphs. A runtime outside Python (C++, TensorRT) can then run a whole action chunk, with the 10-step Euler loop in its own code:
-
-| Graph | Runs | In → out (SmolVLM2-500M sizes, two LIBERO cameras) |
-|---|---|---|
-| `vision` | once per camera | `pixel_values [1,3,512,512]` → image tokens `[1,64,960]` |
-| `prefix` | once per chunk | image tokens, language padded to 48 tokens, state → prefix mask and post-RoPE K/V of the 16 VLM layers |
-| `expert_step` | 10 times per chunk | `x_t`, `t`, prefix mask, K/V → velocity `v_t [1,50,32]` |
-
-```bash
-$PY export_split.py --policy lerobot/smolvla_libero --out-dir onnx_split       # fp32 + strongly typed fp16, parity report
-$PY ort_flow.py --onnx-dir onnx_split --policy lerobot/smolvla_libero --check   # ONNX Runtime chunk vs predict_action_chunk
-$PY tools/dump_bundle.py --policy lerobot/smolvla_libero --out onnx_split/bundle.bin   # inputs, noise, reference actions for other runtimes
-```
-
-- `ort_flow.py` is the reference runtime: ONNX Runtime for the graphs, numpy for LeRobot's Euler update, the same noise as PyTorch.
-- With random weights, offline, the fp32 action chunk matches `predict_action_chunk` to 4.8e-7 on the tiny test model and to 7e-7 at SmolVLM2-500M sizes. The tests require 1e-5.
-- With the real `lerobot/smolvla_libero` weights on 16 LIBERO frames, it matches to 6.3e-6, and the fp16 graphs to 2.0e-3. See [Real weights (CPU)](#real-weights-cpu).
-- The tiny test model has two key/value heads (`make_fake_smolvlm.py --tiny --kv-heads 2`). With one, K/V read in the wrong memory layout would be the same numbers and pass every check.
-- `export_split.py` refuses settings the graphs do not reproduce, before it reads any weights where it can: `add_image_special_tokens`, `prefix_length > 0`, an action expert with fewer layers than the VLM, and the others listed in the contract.
-- [docs/SPLIT_GRAPH.md](docs/SPLIT_GRAPH.md) is the contract. It covers:
-  - graph and tensor names, shapes, dtypes and layouts;
-  - the Euler rule;
-  - the bundle format;
-  - the three places the export deviates from LeRobot's code, and why: a float32 timestep embedding instead of float64, a functional KV cache, and a precomputed RoPE table.
-
-## C++ runtime
-
-[`cpp/`](cpp) runs the split graphs from C++17, with no Python at inference time. Per action chunk it runs `vision` for each camera, `prefix` once, then the 10-step Euler loop over `expert_step`, accumulating in float32 with LeRobot's update rule. Every buffer is allocated and bound when the runtime is built, and `expert_step` reads the prefix K/V in place.
-
-| Part | What it is |
-|---|---|
-| `smolvla_rt` library | `Graph`, an interface over one graph with named, statically shaped inputs and outputs. `OrtGraph` implements it with the ONNX Runtime C++ API, on the CPU or the CUDA execution provider. `TrtGraph` implements it with the TensorRT runtime API of versions 8.5 and 10 (`deserializeCudaEngine`, `setTensorAddress`, `enqueueV3`) and is built only when CMake finds TensorRT. `SmolVLARuntime` checks the three graphs against the contract and runs the chunk. Also readers for `split_manifest.json` and for bundles |
-| `smolvla_rt_bench` | Checks the chunk against a bundle's PyTorch actions (max abs, cosine) and, stage by stage, against LeRobot's intermediate tensors. Times every component (p50/p90/p99 after warm-up). Optionally runs the control-loop harness. Writes a JSON report |
-| Control-loop harness | A 50 Hz control thread takes one action per tick from a chunk buffer, which an inference thread refills when half a chunk is left. It reports wake-up latency, period error, missed deadlines and starved ticks per 10k ticks |
-| `smolvla_rt` Python module | Optional pybind11 build with `ort_flow.SplitRuntime`'s `predict_action_chunk(inputs, noise)` |
-
-**Build**
-
-```bash
-bash cpp/scripts/fetch_onnxruntime.sh                 # ONNX Runtime 1.31.0 C/C++ SDK into cpp/third_party/onnxruntime
-cmake -S cpp -B cpp/build -DCMAKE_BUILD_TYPE=Release  # fetches GoogleTest and nlohmann/json if not installed
-cmake --build cpp/build -j
-```
-
-- `fetch_onnxruntime.sh` downloads the official release archive from GitHub. If GitHub release downloads are blocked, it falls back to the NuGet package, which has the same CPU library. `--flavor cuda12` or `--flavor cuda13` fetches a GPU build.
-- `-DONNXRUNTIME_ROOT=<dir>` uses another SDK. `-DTENSORRT_ROOT=<dir>` adds `TrtGraph` (TensorRT 10 and the CUDA toolkit).
-- `-DSMOLVLA_RT_BUILD_PYTHON=ON -DPython_EXECUTABLE=$PY` builds the Python module for the venv's Python, with the pybind11 that `setup_env.sh` installs there. Without `Python_EXECUTABLE`, CMake builds for the first Python it finds. The module lands in `cpp/build/python`: `PYTHONPATH=cpp/build/python $PY -c "import smolvla_rt; rt = smolvla_rt.Runtime('onnx_split')"`.
-
-**Run**
-
-```bash
-B=cpp/build/smolvla_rt_bench
-$B --onnx-dir onnx_split --bundle onnx_split/bundle.bin --iters 100 --out onnx_split/bench.json   # parity + latency, fp32, CPU
-$B --onnx-dir onnx_split --bundle onnx_split/bundle.bin --precision fp16 --provider cuda
-$B --onnx-dir onnx_split --bundle onnx_split/bundle.bin --precision fp16 --backend trt  # <graph>_fp16.engine files
-$B --onnx-dir onnx_split --bundle onnx_split/bundle.bin --threads 1 --control-loop-ticks 10000 --control-cpu 2 --inference-cpu 3
-bash tests/cpp_parity.sh ~/venvs/smolvla/bin/python   # build, export the tiny test policy, check C++ against PyTorch
-```
-
-- The bench exits with status 1 if the fp32 chunk differs from the bundle's PyTorch actions by more than `--max-abs`, 1e-4 by default. The tests hold the CPU build to 1e-5; the default leaves room for GPU kernels, which add up in a different order than PyTorch on the CPU. fp16 has no default gate; `--min-cosine` sets one.
-- TensorRT engines come from the ONNX graphs, for example `trtexec --onnx=onnx_split/prefix_fp16.onnx --stronglyTyped --saveEngine=onnx_split/prefix_fp16.engine`, once per graph. Build fp32 engines with `--noTF32` as well: TensorRT computes fp32 layers in TF32 unless told not to. TensorRT 8.5 has no `--stronglyTyped`: see [Jetson Xavier NX](#jetson-xavier-nx-tensorrt-85).
-- `--control-cpu` and `--inference-cpu` pin the control thread and the thread that calls `predict_action_chunk`, not ONNX Runtime's worker threads. With the default `--threads 0`, ONNX Runtime starts its own worker threads and pins them to cores itself, ignoring `taskset` and these options, so a worker can share the control thread's CPU; the bench warns about it. With `--threads 1`, as in the measurements below, ONNX Runtime has no workers and runs the graphs on the inference thread.
-
-In C++:
-
-```cpp
-#include "smolvla_rt/loader.h"
-
-auto rt = smolvla_rt::load_runtime(smolvla_rt::Manifest::read("onnx_split"), {});  // ONNX Runtime, fp32, CPU
-smolvla_rt::Observation obs{{pixels_cam0, pixels_cam1}, lang_tokens, lang_mask, state};  // preprocessed, as in docs/SPLIT_GRAPH.md
-rt->predict_action_chunk(obs, noise, actions);  // noise [1, 50, 32] -> actions [1, 50, 7], normalised
-```
-
-**Measured** on a 4-vCPU Xeon cloud VM (CPU only), ONNX Runtime 1.31.0, with the tiny random test policy that `tests/cpp_parity.sh` exports: `make_fake_smolvlm.py --tiny --kv-heads 2`, so 4 VLM layers with 2 key/value heads. The parity numbers were taken with the bundle's PyTorch reference computed on 1 and on 4 threads, and ONNX Runtime on 1 and on 4 threads. A range means the PyTorch thread count moved the last digits; the ONNX Runtime thread count changed nothing.
-
-| Check | Result |
-|---|---|
-| fp32 action chunk vs PyTorch `predict_action_chunk` | max abs 4.8e-7; 9.5e-7 on the GitHub Actions ubuntu-24.04 runner (gate in the tests: 1e-5) |
-| fp32 and fp16 chunks vs `ort_flow.py`, same inputs | bit-identical |
-| Pipeline stages vs LeRobot: image tokens, prefix K/V, `v_t` over 10 steps | max abs 3.5e-6, 1.1e-6 to 1.2e-6, 1.2e-6 to 1.4e-6; pad mask equal |
-| LeRobot's own `x_t` trajectory through the C++ Euler update | bit-identical at all 10 steps, the last one giving the action chunk |
-| fp16 action chunk vs PyTorch fp32 | max abs 1.9e-4 to 2.0e-4, cosine 0.9999999974 to 0.9999999978 |
-
-With one key/value head, K/V read in the wrong memory layout would be the same numbers. With two, a C++ runtime that read the prefix K/V as `[1, P, Hkv, Dh]` instead of `[1, Hkv, P, Dh]` (injected on purpose) moved the fp32 chunk by 0.24 and failed the tests and the bench. On a one-head model the same mistake passes every numeric check, so the parity tests also require more than one head.
-
-Latency on one core (`--threads 1`, pinned to CPU 3, five alternating rounds of 30 chunks against `ort_flow.py`; median of the rounds' p50s, and their range):
-
-| | C++ | `ort_flow.py` |
-|---|---|---|
-| Action chunk | 288 ms (274-302) | 295 ms (271-305) |
-| `vision`, per camera | 94.0 ms (90.5-101.6) | 96.8 ms (90.1-99.6) |
-| `prefix` | 14.8 ms (14.3-16.0) | 15.5 ms (15.1-16.3) |
-| `expert_step`, per step | 7.32 ms (6.89-7.81) | 7.44 ms (7.11-7.77) |
-
-- ONNX Runtime's graph execution dominates, so on this model C++ and Python are within noise of each other: the rounds spread more than they differ.
-- The C++ runtime's own work per chunk is copying the inputs into its buffers, 2.4 ms for two 512x512 cameras, plus the Euler updates, 0.03 ms. Removing the camera-pixel copy, for example by letting the caller write into the runtime's input buffers, is a known follow-up.
-- The tiny model only shows runtime overhead. For the full-size graphs with real weights, see [Real weights (CPU)](#real-weights-cpu): there C++ and Python took about the same time, roughly 10 s per chunk on one core.
-
-Control-loop harness: 10k ticks at 50 Hz on the same model (`--threads 1`), with the next chunk requested when 25 actions are left:
-
-| | Control thread on CPU 2, inference on CPU 3 | Both on CPU 3 |
-|---|---|---|
-| Period error p50 / p99 / max | 0.04 / 3.4 / 78 ms | 0.01 / 2.3 / 34 ms |
-| Wake-up latency p50 / p99 / max | 0.20 / 1.9 / 78 ms | 0.14 / 1.3 / 34 ms |
-| Missed deadlines (woke a full period late), per 10k ticks | 9 | 4 |
-| Ticks without an action, per 10k | 0 | 0 |
-| Inference per chunk, p50 | 287 ms | 291 ms |
-
-- This is soft real-time: a stock kernel (Linux 6.18, `PREEMPT_DYNAMIC`, not `PREEMPT_RT`) in a 4-vCPU VM shared with other jobs, the process at nice 15, no `SCHED_FIFO`.
-- One run per layout, back to back, on a VM where CPU 2 also served other jobs. Here, and in an earlier pair of runs on the one-key/value-head test model, the split layout had the larger tails; these runs cannot say whether that comes from the layout or from the load. A dedicated machine with `--rt-priority` and isolated cores would do better, but nothing here bounds the worst case.
-- Inference took about 290 ms per chunk, and each request left 500 ms of actions, so no tick went without one.
-
-**Not tested**
-- `TrtGraph` on TensorRT 10. It has only run on TensorRT 8.5.2, in [Jetson Xavier NX](#jetson-xavier-nx-tensorrt-85). Against 10 it compiles, with `-Wall -Wextra -Wpedantic -Wshadow -Werror`, with the TensorRT 10.16 headers from NVIDIA's OSS repository, but was never linked to it or given an engine. This configuration repeats that check; it needs neither ONNX Runtime nor GoogleTest:
-  `cmake -S cpp -B cpp/build-trt -DSMOLVLA_RT_TRT_COMPILE_CHECK=ON -DSMOLVLA_RT_WERROR=ON -DSMOLVLA_RT_WITH_ORT=OFF -DSMOLVLA_RT_BUILD_TESTS=OFF -DTENSORRT_ROOT=<TensorRT/include parent> -DSMOLVLA_RT_CUDA_INCLUDE_DIR=<dir with cuda_runtime_api.h>`, then `cmake --build cpp/build-trt`.
-- Several GPUs. The current CUDA device belongs to each thread, and the runtime can be driven from threads other than the one that built it: the control loop's inference thread, or Python threads. `CudaDevice` therefore selects its device on the calling thread before every allocation, copy and free. `cpp/tests/test_cuda_device.cpp` checks that on the CPU against a stand-in for the CUDA runtime, one operation per new thread. `TrtGraph` selects its device in `run()` and in its destructor; that part is compile-checked only.
-- The real CUDA calls behind `CudaDevice` (`cpp/src/cuda_api.cpp`) ran on the Jetson, on CUDA 11.4. They were linked against CUDA 12.9's `libcudart` too, but there only the "no CUDA driver" error path ran.
-- ONNX Runtime's CUDA execution provider: the SDK used here is CPU-only. With it, `OrtGraph` keeps buffers in host memory, so ONNX Runtime copies the prefix K/V to the GPU on every expert step; `TrtGraph` keeps them on the device.
-- The guard against a fused multiply-add in the Euler update (`Contract.EulerUpdateRoundsTheProductSeparately`, for the build's `-ffp-contract=off`) can only fail where the compiler may emit FMA instructions: aarch64, as on Jetson, or x86-64 built with `-march=native` on a CPU that has them. The default x86-64 target has no FMA, so on this VM and on the CI runner the test would pass without the flag too. The Jetson is aarch64, but the C++ unit tests were not built there.
-- GPU latency that says anything about SmolVLA, other than on the [Xavier NX](#jetson-xavier-nx-tensorrt-85). The numbers in this section come from random weights. Real weights in fp16 were probed tensor by tensor on the CPU only, in [Real weights (CPU)](#real-weights-cpu). There the fp16 `vision` graph's attention scores stayed within ±48. The only overflow, inside the vision tower's GELU, did no harm on ONNX Runtime's CPU provider, nor with every node evaluated in IEEE fp16 (numpy). TensorRT's fused kernels on the Xavier NX cannot be probed that way; their fp16 outputs stayed finite.
-- The aarch64 branch of `fetch_onnxruntime.sh`, and ONNX Runtime on aarch64. Everything in this section ran on x86-64 with GCC 13; the only aarch64 run is below.
-
-## Jetson Xavier NX (TensorRT 8.5)
-
-A Xavier NX stays on JetPack 5: TensorRT 8.5.2, CUDA 11.4, Ubuntu 20.04. NVIDIA says JetPack 6 does not support Xavier, and TensorRT 10 targets Turing and newer, while this GPU is Volta (`sm_72`). So `export_split.py --for-tensorrt85` writes graphs for it:
-
-```bash
-$PY export_split.py --policy lerobot/smolvla_libero --out-dir onnx_split --for-tensorrt85   # on a PC; fp32 and fp16
-$PY tools/dump_bundle.py --policy lerobot/smolvla_libero --out onnx_split/bundle.bin
-# On the Jetson, for each of vision, prefix and expert_step (real fp32 weights need the memory steps below):
-/usr/src/tensorrt/bin/trtexec --onnx=onnx_split/prefix_fp32.onnx --noTF32 --buildOnly --saveEngine=onnx_split/prefix_fp32.engine
-/usr/src/tensorrt/bin/trtexec --onnx=onnx_split/prefix_fp16.onnx --noTF32 $(cat onnx_split/prefix_fp16.trt85_flags) \
-  --buildOnly --saveEngine=onnx_split/prefix_fp16.engine
-```
-
-The flag changes three things. TensorRT 8.5 cannot import `LayerNormalization`, so it is written as basic ops, its statistics in fp32. Each fp16 graph gets a `<graph>_fp16.trt85_flags` file, the `trtexec` flags without which its engine gives wrong actions (**fp16**, below). And the graphs are really opset 17:
-
-- **Opset 18 builds and runs, and gives wrong numbers.** TensorRT 8.5's parser accepts an opset 18 `ReduceMean` without an error but ignores its axes input and averages over every axis, so every RMSNorm is wrong. On the tiny model the action chunk moved by 0.18 and the prefix K/V by 1.1. Only the parity check showed it.
-- **`--opset 17` alone used to leave two of the graphs at 18.** ONNX's version converter fails on `prefix` and `expert_step`, and torch.onnx only logs that. `export_split.py` now lowers them itself and refuses any graph that comes out at another opset than the one asked for.
-
-`lang_tokens` is int32 in these engines, since TensorRT 8.5 has no int64; `SmolVLARuntime` narrows it.
-
-**Real weights.** `lerobot/smolvla_libero` at `a24f1f3`, on the 16 LIBERO frames of [Real weights (CPU)](#real-weights-cpu), same hashes, and on the synthetic observation. `smolvla_rt_bench --backend trt`: GCC 9.4, TensorRT 8.5.2, fp32 engines built with `--noTF32`, against LeRobot's fp32 on an x86-64 CPU. The report is [`results/jetson_xavier_nx_trt85_real_fp32.json`](results/jetson_xavier_nx_trt85_real_fp32.json).
-
-| Worst over the 16 frames | Max abs | Relative L2 |
-|---|---|---|
-| fp32 action chunk vs `predict_action_chunk` (gate 1e-4) | 1.6e-5 | |
-| Image tokens, which reach 245 | 2.9e-4 | 1.9e-6 |
-| Prefix K/V | 1.2e-4 | 2.3e-6 |
-| `v_t`, 10 steps | 5.6e-4 | 7.1e-6 |
-
-The smallest chunk cosine was 0.999999999996. The pad mask was equal, each rerun was identical and nothing was non-finite. On the CPU the same frames gave 6.3e-6 with ONNX Runtime.
-
-| 50 chunks after 5 warm-up, p50 (p99), frame 0 | ms |
-|---|---|
-| Action chunk | 1003 (1020) |
-| Vision, per camera | 326 (342) |
-| VLM prefix | 88 (98) |
-| Action expert, per step | 25.9 (26.4) |
-
-- **Where the time goes.** Vision takes 65% of a chunk, the 10 expert steps 26% and the prefix 9%. The synthetic observation gave 997 ms.
-- **Conditions.** 20 W mode, default clock governor with the GPU at its top 1109 MHz right after the run, about a minute of load (59.5 °C at the end). The desktop was off and no live robot stack ran, so this is neither sustained nor loaded latency. With the desktop on, frame 0 gave the same 4.05e-6 and 999 ms.
-- **Memory.** The process peaked at about 4.4 GB. That left 1.6 GB available with the desktop off and 750 MB with it on, little room for a robot stack beside it.
-- **Page cache.** CUDA memory on this board comes from nvmap, which does not reclaim the page cache. `TrtGraph` therefore drops each engine file from the cache after reading it. Without that, the third engine failed to load with the desktop on, with 1.3 GB shown available.
-
-**Building the engines takes most of the board's memory.** The `prefix` engine's workspace grows to 1 GiB. With the desktop on, that allocation fails, with 1.1 to 1.5 GB shown available, and `--memPoolSize=workspace:N` and removing tactics did not change it. It built with the desktop off and the file cache dropped, peaking at 4.9 GB and leaving 1.2 GB available:
-
-```bash
-sudo systemctl stop gdm3 nxserver; sync; sudo sh -c "echo 3 > /proc/sys/vm/drop_caches"
-# build the engines; afterwards:
-sudo systemctl start nxserver gdm3
-```
-
-`cudaMalloc` failed there with 1.8 GB shown available, most of it file cache, so drop the cache before a build. `vision` and `expert_step`, with a 512 MiB workspace, built with the desktop on once the cache was out. The engines took 65, 143 and 153 s for `vision`, `prefix` and `expert_step`.
-
-**fp16.** The same frames, observation and bench, with the fp16 graphs. The report is [`results/jetson_xavier_nx_trt85_real_fp16.json`](results/jetson_xavier_nx_trt85_real_fp16.json). TensorRT 8.5 has no strongly typed mode, and its defaults give wrong actions:
-
-- **`--fp16` is needed, and alone it is wrong.** Without it the build stops, since the parser sets fp16 on the layers the graph types as fp16. With it, Myelin, which fuses nearly every graph whole and reports nothing per layer, also computes in fp16 what the graph keeps in fp32. Each graph alone on LeRobot's inputs then misses by a relative L2 of 0.22 (`vision`) and 0.86 (`prefix` K/V), and the chunk by 1.4 to 4.5, with cosines from -0.13 to 0.91. Nothing was non-finite.
-- **`<graph>_fp16.trt85_flags` holds TensorRT to the graph's types.** `--precisionConstraints=obey` with `--layerPrecisions` and `--layerOutputTypes` pins every node with an fp32 output to fp32: 200, 629 and 619 nodes in `vision`, `prefix` and `expert_step`.
-- **`expert_step` needs all its Sigmoids in fp32.** The time MLP's Sigmoid is fp32 and the expert MLPs' 16 are fp16. Myelin gives the constant 1 of a fused block's Sigmoids one type, and with only the fp32 nodes pinned the build fails ("Could not infer output types"). So the flags put the 16 in fp32 as well.
-
-| Chunk vs `predict_action_chunk`, max abs in action std, 16 frames | Median | Worst |
-|---|---|---|
-| fp16 engines with the flags, Xavier NX | 0.013 | 0.060 |
-| LeRobot's own bf16, PyTorch on the CPU | 0.018 | 0.049 |
-| PyTorch `fp16all` on the CPU, frames 1, 5, 9 and 13 | 0.0023 | 0.0029 |
-| fp16 graphs on ONNX Runtime's CPU provider | 0.0012 | 0.0020 |
-
-- **In bf16's range, not the CPU's.** The engines came closer to fp32 than LeRobot's bf16 on 11 of the 16 frames, but went 4.3 to 5.6 times as far as PyTorch's `fp16all` on its four frames. The smallest cosine was 0.999975, nothing was non-finite, each rerun was identical and the pad mask was equal. The synthetic observation gave 0.025.
-- **The error upstream is even; the denoising decides.** Through the pipeline, the image tokens (values up to 245) and the prefix K/V differ from LeRobot's by a relative L2 of 3.4e-3 to 5.8e-3 and 6.3e-3 to 7.2e-3 on every frame. How far the ten Euler steps carry that differs: frame 10's chunk moved by 0.060, the others' by 0.008 to 0.031. bf16's worst frame is another one, 12.
-- **Each graph alone** on LeRobot's inputs: relative L2 3.9e-3 (`vision`), 6.1e-3 (`prefix` K/V) and 1.5e-3 (`expert_step`'s `v_t`). The max abs is 4.5 (`expert_step`) to 18 (`prefix`) times ONNX Runtime's on the CPU, which multiplies the matrices in fp32. The flags pin the layers' types, not how TensorRT's fp16 kernels accumulate; where the extra error comes from was not examined.
-
-| 50 chunks after 5 warm-up, p50 (p99), frame 0, ms | fp16 | fp32 |
-|---|---|---|
-| Action chunk | 327 (336) | 1003 (1020) |
-| Vision, per camera | 80 (84) | 326 (342) |
-| VLM prefix | 28 (29) | 88 (98) |
-| Action expert, per step | 12.6 (13.9) | 25.9 (26.4) |
-| Inputs to the GPU | 11.1 (12.5) | 1.4 (1.7) |
-
-- **3.1 times as fast.** Vision 4.1 times, the prefix 3.2 and an expert step 2.1. Keeping the fp32 parts cost 2.5%: without the flags a chunk took 319 ms. Converting the camera images to fp16, on the CPU, takes 3% of the chunk.
-- **Conditions.** As for fp32, but with the desktop on (fp32 gave 999 ms with it on), and 53 °C at the end. On the synthetic observation the chunk took 329 ms, with a p99 of 396 ms.
-- **Memory.** All three engines built with the desktop on, in 130, 167 and 170 s; the `vision` build peaked at 4.2 GB. A run peaked at 2.7 GB and left 2.1 GB available, against 750 MB in fp32 with the desktop on. The engines take 197, 392 and 204 MB.
-
-**Tiny model.** The same flow on the tiny random test policy (2 key/value heads). The report is [`results/jetson_xavier_nx_trt85_tiny_fp32.json`](results/jetson_xavier_nx_trt85_tiny_fp32.json).
-
-| Check | Max abs | Cosine |
-|---|---|---|
-| fp32 action chunk vs `predict_action_chunk` | 1.6e-6 | 0.9999999999998 |
-| Image tokens | 3.5e-6 | 0.9999999999997 |
-| Prefix K/V | 1.4e-5 | 0.9999999999984 |
-| `v_t`, 10 steps | 1.1e-5 | 0.9999999999922 |
-
-The pad mask was equal, a rerun was identical and nothing was non-finite. The engine builds took 22, 107 and 120 s for `vision`, `prefix` and `expert_step`.
-
-**Not tested on the Jetson**
-- Sustained load, pinned clocks, or the policy running beside a live robot stack on the same board.
-- Closed-loop success, in either precision, and fp16 on more than these 16 frames.
-- The CMake build: JetPack's apt offers CMake 3.16, and `cpp/CMakeLists.txt` needs 3.18. This run compiled `cpp/src` (without `ort_graph.cpp`) and `cpp/tools/bench.cpp` with g++ directly, with `-ffp-contract=off`, and linked `-lnvinfer -lcudart`. The C++ unit tests and ONNX Runtime did not run there.
-
-## Real weights (CPU)
-
-Every measured number above comes from random weights. This run used the real [`lerobot/smolvla_libero`](https://huggingface.co/lerobot/smolvla_libero) checkpoint and 16 real frames of [`lerobot/libero`](https://huggingface.co/datasets/lerobot/libero), the dataset its training config names: 4 episodes, one task from each LIBERO suite, 4 frames each, both cameras, state and task. Everything went through the checkpoint's own pre- and postprocessors, and each frame got the same noise in every runtime.
-
-CPU only, on a 4-vCPU Xeon VM. Every measurement ran on one core and one thread. The exception is `export_split.py`'s own check, which used ONNX Runtime's default pool of 4 threads on that core.
-- [`results/REAL_WEIGHTS_CPU.md`](results/REAL_WEIGHTS_CPU.md) has the details and [`results/real_weights_cpu.json`](results/real_weights_cpu.json) the numbers.
-- `bash scripts/run_real_weights_cpu.sh PYTHON WORK_DIR` reproduces the run from the Hub. A rerun of its `inputs`, `bundles`, `fp32` and `fp16` steps with the committed tools reproduced those steps' numbers bit for bit, timings aside.
-- The reference is LeRobot's `predict_action_chunk` in fp32. Its actions are 0.07 std from the dataset's demonstrated actions on average over the first 10 steps, against 0.72 for the mean action, so weights and preprocessing are right.
-
-Against that reference, worst case over the 16 frames, in normalised action space (units of each action dimension's std):
-
-| | Max abs | Cosine, smallest | Non-finite |
-|---|---|---|---|
-| Split graphs fp32, `ort_flow.py` and the C++ runtime (same numbers) | 6.3e-6 | 0.9999999999996 | 0 |
-| Split graphs fp16, `ort_flow.py` and the C++ runtime (same numbers) | 2.0e-3 | 0.99999992 | 0 |
-| PyTorch `fp16all`, `fp16vlm`, `amp` (4 of the frames) | 2.9e-3 | 0.99999975 | 0 |
-| PyTorch `lerobot`: bf16, what LeRobot runs for this checkpoint | 4.9e-2 | 0.99995 | 0 |
-| PyTorch `bf16vlm`, `bf16all` | 3.7e-2, 3.2e-2 | 0.99996 | 0 |
-
-`lerobot_amp` fails on the CPU, as expected (`mixed dtype`).
-
-**fp16 is safe for this checkpoint on these frames**, under the two conditions below:
-- **The probe.** Every floating-point intermediate tensor of the three fp16 graphs was made a graph output and read on all 16 frames, each fp16 tensor as it rounds to fp16. One overflowed: the cube `x^3` inside the tanh GELU of the last two SigLIP layers, which the exporter writes out node by node. ONNX Runtime's CPU provider handed the next nodes the fp32 cube. An engine that keeps every node in fp16 overflows the three nodes after the cube too.
-- **The overflow is harmless where it was checked.** tanh saturates. Evaluated node by node in IEEE fp16 (numpy), the formula still returns x or 0, exactly, wherever the cube overflows, and no finite fp16 input gives a non-finite output. On ONNX Runtime's CPU provider the chunk stays finite. GPU kernels were not tested.
-- **The margins.** Outside the GELU, the largest fp16 tensors are the vision residual stream at 663.5 and the VLM residual stream at 7732, 8.5 times below fp16's 65504. Inside the GELU, the nodes after the cube reached 50912 in this run, 1.29 times below, and the cube itself reached 26768 in a layer where it did not overflow. All of these feed tanh. The vision attention scores, the only fp16 ones, stay within ±48.
-- **Condition 1: the fp32 parts stay fp32.** The fp16 graphs are strongly typed and keep some tensors in fp32: the RMSNorm statistics (the VLM's residual stream squared reaches 6.0e7), the VLM's and the expert's attention scores, softmax and masks, RoPE, and the expert's time embedding (values up to 4096). The vision tower's LayerNorm statistics must stay fp32 too (ONNX's default `stash_type`), since its inputs reach 663.5. A runtime has to honour these types; TensorRT 8.5 does not by itself ([Jetson Xavier NX](#jetson-xavier-nx-tensorrt-85)).
-- **Condition 2: 16 frames are a small sample.** The margins come from these frames only.
-- **bf16 moves the actions more than fp16.** On the four frames where both ran, LeRobot's own bf16 moved the chunk 4 to 11 times as far as PyTorch's `fp16all`, and up to 15 times as far as `fp16vlm` and 12 as far as `amp`.
-- **The CPU's fp16 chunk is optimistic.** ONNX Runtime's CPU provider computes the fp16 graphs' matrix products in fp32, so its fp16 chunk is likely closer to fp32 than a GPU's. On the same frames it gave 1.2e-3, against 2.9e-3 for PyTorch's `fp16all`, which rounds every fp16 operation's output.
-
-CPU latency on one thread, p50: a chunk takes 9.4 s in PyTorch fp32, 10.1 s with the fp32 split graphs from Python and 9.95 s from C++. bf16 and fp16 are slower on this CPU, which has no arithmetic for either: PyTorch bf16 24.6 s, PyTorch fp16 64.7 s, fp16 graphs 11.2 to 12.1 s. These say nothing about a GPU.
-
-**Not tested:**
-- any GPU but the Xavier NX, where [fp32 and fp16 engines ran](#jetson-xavier-nx-tensorrt-85);
-- whether TensorRT keeps the fp32-typed tensors in fp32 inside its fused kernels. TensorRT 8.5 does not unless each layer is pinned; with the pins its chunks land in bf16's range, but the kernels report nothing per layer;
-- how a fused GPU GELU kernel treats the GELU's infinite intermediate;
-- other checkpoints, more frames, and closed-loop success.
-
-## Method notes
-
-**Timing**
-- Every region boundary calls `torch.cuda.synchronize()`, so GPU work is charged to the region that launched it.
-- That costs a little, so each variant also runs uninstrumented. The headline end-to-end number comes from that run; the instrumentation overhead is reported.
-- `trt_vision.py` times with CUDA events on one stream, inputs already on the GPU. Its optional PyTorch baseline uses the same method, so the two are comparable.
-
-**Inputs**
-- Synthetic, shaped like the checkpoint's input features: images in [0, 1], 256×256, two cameras for LIBERO.
-- Image content does not change latency.
-- Language token count does change it, so `--task` is a real LIBERO instruction.
-
-**Parity**
-- Each variant's raw action chunk (normalised space, before unnormalising) is compared with the fp32 chunk under identical noise: max-abs, mean-abs, relative L2, cosine.
-- The fp32 reference holds the checkpoint's stored values exactly. The policy is built with `load_vlm_weights=false` and cast to fp32 *before* the weights are copied in, so a bf16 dtype in the base VLM's config cannot round them.
-- The dtypes the constructor produced are recorded as `built_dtypes`.
-- Every variant starts from that reference and casts parameters directly. Nothing is rounded through a dtype and back.
-
-**Backend flags**
-- Our variants run with TF32 and `cudnn.benchmark` off.
-- The `lerobot*` variants turn both on, as `lerobot_eval.py` does.
-- Each result records the flags it ran with.
-- The ONNX parity reference is computed with TF32 off.
-
-**Not claimed here**
-- Closed-loop task success. Numerical parity is not closed-loop parity; paired simulator rollouts are the next project.
-
-**Record clocks and versions**
-- GPU clocks vary on cloud machines. `sysinfo` records clocks and throttle reasons at idle and after each variant's timed loop, plus driver, CUDA, TensorRT and package versions.
-- It reads them from the device torch actually uses, so `CUDA_VISIBLE_DEVICES` is respected.
+| [Getting started](docs/GETTING_STARTED.md) | Setup, the GPU run, the offline tests |
+| [How it works](docs/HOW_IT_WORKS.md) | The split, one chunk step by step, the system structure, a map of the repo |
+| [Experiments and results](docs/EXPERIMENTS.md) | Every experiment, its setup and its numbers |
+| [Jetson Xavier NX](docs/JETSON.md) | Step by step on JetPack 5, fp32 and fp16 results, the TensorRT 8.5 traps, memory |
+| [C++ runtime](docs/CPP_RUNTIME.md) | Build, API, bench, measurements, the control-loop harness |
+| [Precision layout and method](docs/PRECISION.md) | Which dtypes LeRobot really runs, the variants, how timing and parity are taken |
+| [Split-graph contract](docs/SPLIT_GRAPH.md) | Every tensor's name, shape, dtype and layout; the Euler rule; the bundle format |
+| [Real weights on the CPU](results/REAL_WEIGHTS_CPU.md) | The full real-weights write-up, with the fp16 range probe |
+
+## Status
+
+- **Measured:** the split graphs and the C++ runtime against LeRobot on the CPU, in CI on every push; the real checkpoint in every precision on the CPU; fp32 and fp16 on a Jetson Xavier NX.
+- **Not yet:** closed-loop task success, which numerical parity does not imply (paired simulator rollouts are next); any GPU but the Xavier NX; sustained load, or a robot stack running beside the policy on the Jetson.
 
 ## Prior work
 
@@ -400,6 +100,7 @@ CPU latency on one thread, p50: a chunk takes 9.4 s in PyTorch fp32, 10.1 s with
 - Per-component timing on the original PyTorch stack.
 - A precision layout that matches what LeRobot actually runs, checked against LeRobot.
 - A strongly typed FP16 path that survives TensorRT 11's removal of weak typing.
+- The real checkpoint on a Jetson Xavier NX, fp32 and fp16, with the changes TensorRT 8.5 needs to compute it correctly.
 
 ## Licence
 
