@@ -14,7 +14,7 @@ Together they reproduce `SmolVLAPolicy.predict_action_chunk` after preprocessing
 - `ort_flow.py` is the reference implementation: ONNX Runtime for the graphs, numpy for the loop. With `--bundle` it needs only numpy, onnx and onnxruntime, so it also runs on a device without torch.
 - `smolvla_latency/split_contract.py` holds the tensor names and the Euler schedule, also numpy only.
 - `tools/dump_bundle.py` writes test vectors for other runtimes.
-- `cpp/` implements this contract in C++17, with ONNX Runtime or TensorRT for the graphs and the loop in C++, and checks itself against those test vectors. See the README's "C++ runtime" section.
+- `cpp/` implements this contract in C++17, with ONNX Runtime or TensorRT for the graphs and the loop in C++, and checks itself against those test vectors. See [C++ runtime](CPP_RUNTIME.md).
 
 All shapes are static and the batch size is 1. Sizes below use the names in `split_manifest.json`'s `config`. The last column is the full-size test fixture: SmolVLM2-500M layer sizes with LIBERO-shaped inputs (two 256x256 cameras, 8-d state, 7-d actions).
 
@@ -195,7 +195,7 @@ The tests check each one against LeRobot.
 
 In a TensorRT 8.5 engine `lang_tokens` is int32, since it has no int64. `SmolVLARuntime` accepts that and narrows the ids; manifests and bundles stay int64.
 
-With the real weights these fp32 graphs match LeRobot's chunk to 1.6e-5 on 16 LIBERO frames, on a Xavier NX GPU. The fp16 graphs, built with the flags, land within 6.0e-2 of it, in the range of LeRobot's own bf16, at 0.33 s per chunk against 1.0 s. Building the fp32 `prefix` engine takes most of that board's memory: see [the README](../README.md#jetson-xavier-nx-tensorrt-85).
+With the real weights these fp32 graphs match LeRobot's chunk to 1.6e-5 on 16 LIBERO frames, on a Xavier NX GPU. The fp16 graphs, built with the flags, land within 6.0e-2 of it, in the range of LeRobot's own bf16, at 0.33 s per chunk against 1.0 s. Building the fp32 `prefix` engine takes most of that board's memory: see [Jetson Xavier NX](JETSON.md).
 
 **Not supported** (the export raises `NotImplementedError` naming the setting):
 - `empty_cameras > 0` or masked cameras;
@@ -297,9 +297,9 @@ The test asserts each fp32 graph at 1e-4 and the fp32 chunk at 1e-5. fp16 is rep
 Inputs and outputs had the shapes in the tables above, with `D = 960`, `Hkv = 5` and `Dh = 64`.
 
 **Not tested here**
-- TensorRT engines at full size. The tiny model's fp32 engines ran on a Jetson Xavier NX with TensorRT 8.5.2; see the README's "Jetson Xavier NX" section.
+- TensorRT engines of these random-weight graphs. Full-size engines ran with the real weights instead, in fp32 and fp16, on a Jetson Xavier NX: see [Jetson Xavier NX](JETSON.md).
 - ONNX Runtime's CUDA execution provider.
-- Real checkpoint weights on a GPU. On the CPU, see the next section.
+- Real checkpoint weights on a GPU other than the Xavier NX. On the CPU, see the next section.
 
 ## Real weights (CPU)
 
