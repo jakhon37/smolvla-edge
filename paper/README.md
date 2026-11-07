@@ -9,6 +9,8 @@ cd paper
 latexmk -pdf main.tex        # or: pdflatex main && bibtex main && pdflatex main && pdflatex main
 ```
 
+Or with [tectonic](https://tectonic-typesetting.github.io), a single binary that fetches the TeX packages it needs: `tectonic main.tex`. The draft was checked that way: tectonic runs XeTeX, where `main.tex` sets TeX Gyre Termes in place of the Times that pdfLaTeX and arXiv use, so the line breaks match.
+
 On Overleaf, upload `main.tex`, `refs.bib` and the `figures/` folder; IEEEtran is built in.
 
 ## Figures
