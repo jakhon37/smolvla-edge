@@ -2,6 +2,7 @@
 
     python tools/make_figures.py                       # docs/figures/<name>.svg and <name>-dark.svg
     python tools/make_figures.py --png /tmp/preview    # also PNGs, to look at them
+    python tools/make_figures.py --paper paper/figures # the report's PDF figures, sized for two columns
 
 Every number in a chart is read from results/. The three diagrams (overview, one action chunk, architecture) are
 drawn here with the names and shapes of docs/SPLIT_GRAPH.md. Each figure is written for a light and a dark page; the
@@ -81,16 +82,16 @@ def chart(t: dict, width: float, plot_height: float, title: str, subtitle: str, 
     return fig, ax
 
 
-def legend(fig, t: dict, items, x_in: float, marker: str = "s") -> None:
+def legend(fig, t: dict, items, x_in: float, marker: str = "s", size: float = 9.5) -> None:
     """Swatch and label pairs in one row under the subtitle; labels in ink, identity in the swatch."""
-    width = fig.get_figwidth()
+    width, k = fig.get_figwidth(), size / 9.5
     x = x_in / width
     for colour, label in items:
-        fig.add_artist(plt.Line2D([x], [fig.legend_y], marker=marker, markersize=8, color=colour, linewidth=0,
+        fig.add_artist(plt.Line2D([x], [fig.legend_y], marker=marker, markersize=8 * k, color=colour, linewidth=0,
                                   transform=fig.transFigure))
-        txt = fig.text(x + 0.13 / width, fig.legend_y, label, color=t["ink2"], fontsize=9.5, va="center")
+        txt = fig.text(x + 0.13 * k / width, fig.legend_y, label, color=t["ink2"], fontsize=size, va="center")
         fig.canvas.draw()
-        x = fig.transFigure.inverted().transform(txt.get_window_extent().corners()[-1])[0] + 0.3 / width
+        x = fig.transFigure.inverted().transform(txt.get_window_extent().corners()[-1])[0] + 0.3 * k / width
 
 
 def fmt(v: float) -> str:
@@ -107,17 +108,50 @@ def log_axis(ax, t: dict, lo: int, hi: int, room: float = 1.0) -> None:
     ax.set_xticklabels([f"10$^{{{e}}}$" if e not in (0, 1) else ("1" if e == 0 else "10") for e in range(lo, hi + 1)])
 
 
+# ---------------------------------------------------------------------------------------------- chart data
+
+LATENCY_PARTS = [("Vision, 2 cameras", "blue", lambda r: CAMERAS * r["vision"]["p50"]),
+                 ("VLM prefix", "orange", lambda r: r["prefix"]["p50"]),
+                 ("Action expert, 10 steps", "aqua", lambda r: STEPS * r["expert_step"]["p50"]),
+                 ("Inputs and Euler updates", "yellow", lambda r: r["inputs"]["p50"] + r["euler"]["p50"])]
+
+
+def latency_runs() -> list:
+    """(label, the bench's latency_ms on LIBERO frame 0) for fp32 and fp16 on the Jetson."""
+    return [("fp32", results("jetson_xavier_nx_trt85_real_fp32.json")["latency_ms"]["frame_0"]),
+            ("fp16, fp32 layers pinned", results("jetson_xavier_nx_trt85_real_fp16.json")["latency_ms"]["frame_0"])]
+
+
+def precision_rows() -> list:
+    """(precision, runtime, chunk max abs per frame) for every precision and runtime measured."""
+    cpu, j32, j16 = (results(n) for n in ("real_weights_cpu.json", "jetson_xavier_nx_trt85_real_fp32.json",
+                                          "jetson_xavier_nx_trt85_real_fp16.json"))
+    pyt = cpu["p0_pytorch_cpu"]["variants"]
+    return [
+        ("fp32", "ONNX Runtime, CPU", cpu["split_graphs"]["fp32"]["actions_max_abs_per_frame"]),
+        ("fp32", "TensorRT 8.5, Jetson", j32["parity"]["frames_16"]["chunk_max_abs_per_frame"]),
+        ("fp16", "ONNX Runtime, CPU", cpu["split_graphs"]["fp16"]["actions_max_abs_per_frame"]),
+        ("fp16", "PyTorch fp16all, CPU (4 frames)", list(pyt["fp16all"]["max_abs_per_frame"].values())),
+        ("fp16", "TensorRT 8.5, fp32 layers pinned, Jetson", j16["parity"]["frames_16"]["chunk_max_abs_per_frame"]),
+        ("bf16", "PyTorch, as LeRobot runs it, CPU", list(pyt["lerobot"]["max_abs_per_frame"].values())),
+        ("fp16", "TensorRT 8.5, plain --fp16, Jetson", j16["without_the_flags"]["chunk_max_abs_per_frame"]),
+    ]
+
+
+def pinning_rows() -> list:
+    """(graph key, relative L2 without the pins, with them): each fp16 engine alone on LeRobot's inputs."""
+    j16 = results("jetson_xavier_nx_trt85_real_fp16.json")
+    plain = j16["without_the_flags"]["each_graph_alone_on_lerobot_inputs_frames_16"]
+    pinned = j16["parity"]["each_graph_alone_on_lerobot_inputs_frames_16"]
+    return [(key, plain[key]["rel_l2"], pinned[key]["rel_l2"]) for key in ("image_tokens", "prefix_kv", "v_t")]
+
+
 # ---------------------------------------------------------------------------------------------- charts
 
 
 def jetson_latency(t: dict):
     """Where one chunk's time goes on the Jetson, fp32 against fp16; p50 of each stage, frame 0."""
-    runs = [("fp32", results("jetson_xavier_nx_trt85_real_fp32.json")["latency_ms"]["frame_0"]),
-            ("fp16, fp32 layers pinned", results("jetson_xavier_nx_trt85_real_fp16.json")["latency_ms"]["frame_0"])]
-    parts = [("Vision, 2 cameras", "blue", lambda r: CAMERAS * r["vision"]["p50"]),
-             ("VLM prefix", "orange", lambda r: r["prefix"]["p50"]),
-             ("Action expert, 10 steps", "aqua", lambda r: STEPS * r["expert_step"]["p50"]),
-             ("Inputs and Euler updates", "yellow", lambda r: r["inputs"]["p50"] + r["euler"]["p50"])]
+    runs, parts = latency_runs(), LATENCY_PARTS
     fig, ax = chart(t, 9.6, 1.6, "One action chunk on a Jetson Xavier NX: 1.0 s in fp32, 0.33 s in fp16",
                     "p50 of 50 chunks after 5 warm-up, real lerobot/smolvla_libero weights, LIBERO frame 0, "
                     "TensorRT 8.5.2", left=2.0)
@@ -145,18 +179,7 @@ def jetson_latency(t: dict):
 
 def precision_accuracy(t: dict):
     """Chunk error per frame against LeRobot's fp32, for every precision and runtime measured."""
-    cpu, j32, j16 = (results(n) for n in ("real_weights_cpu.json", "jetson_xavier_nx_trt85_real_fp32.json",
-                                          "jetson_xavier_nx_trt85_real_fp16.json"))
-    pyt = cpu["p0_pytorch_cpu"]["variants"]
-    rows = [
-        ("fp32", "ONNX Runtime, CPU", cpu["split_graphs"]["fp32"]["actions_max_abs_per_frame"]),
-        ("fp32", "TensorRT 8.5, Jetson", j32["parity"]["frames_16"]["chunk_max_abs_per_frame"]),
-        ("fp16", "ONNX Runtime, CPU", cpu["split_graphs"]["fp16"]["actions_max_abs_per_frame"]),
-        ("fp16", "PyTorch fp16all, CPU (4 frames)", list(pyt["fp16all"]["max_abs_per_frame"].values())),
-        ("fp16", "TensorRT 8.5, fp32 layers pinned, Jetson", j16["parity"]["frames_16"]["chunk_max_abs_per_frame"]),
-        ("bf16", "PyTorch, as LeRobot runs it, CPU", list(pyt["lerobot"]["max_abs_per_frame"].values())),
-        ("fp16", "TensorRT 8.5, plain --fp16, Jetson", j16["without_the_flags"]["chunk_max_abs_per_frame"]),
-    ]
+    rows = precision_rows()
     fig, ax = chart(t, 9.6, 3.3, "How far each precision moves the action chunk from LeRobot's fp32",
                     "Max abs difference per LIBERO frame, in action std units; each dot is a frame, the bar the "
                     "median. Real lerobot/smolvla_libero weights.", left=3.2)
@@ -182,18 +205,15 @@ def precision_accuracy(t: dict):
 
 def fp16_pinning(t: dict):
     """Each fp16 engine alone on LeRobot's inputs, without and with the pinned fp32 layers."""
-    j16 = results("jetson_xavier_nx_trt85_real_fp16.json")
-    plain = j16["without_the_flags"]["each_graph_alone_on_lerobot_inputs_frames_16"]
-    pinned = j16["parity"]["each_graph_alone_on_lerobot_inputs_frames_16"]
-    rows = [("vision  →  image tokens", "image_tokens"), ("prefix  →  K/V cache", "prefix_kv"),
-            ("expert_step  →  velocity v_t", "v_t")]
+    labels = {"image_tokens": "vision  →  image tokens", "prefix_kv": "prefix  →  K/V cache",
+              "v_t": "expert_step  →  velocity v_t"}
+    rows = [(labels[key], a, b) for key, a, b in pinning_rows()]
     fig, ax = chart(t, 9.6, 1.5, "Plain --fp16 breaks vision and prefix; pinning the fp32 layers fixes them",
                     "Relative L2 against LeRobot's fp32, each engine alone on LeRobot's inputs, 16 LIBERO frames, "
                     "TensorRT 8.5.2", left=2.6)
     gray = t["muted"]
-    for i, (label, key) in enumerate(rows):
+    for i, (label, a, b) in enumerate(rows):
         y = len(rows) - 1 - i
-        a, b = plain[key]["rel_l2"], pinned[key]["rel_l2"]
         ax.plot([b, a], [y, y], color=t["axis"], linewidth=2, zorder=2)
         ax.scatter([a], [y], s=60, color=gray, edgecolors=t["surface"], linewidths=1.2, zorder=3)
         ax.scatter([b], [y], s=60, color=t["orange"], edgecolors=t["surface"], linewidths=1.2, zorder=3)
@@ -364,6 +384,144 @@ def architecture(t: dict):
     return fig
 
 
+# ---------------------------------------------------------------------------------------------- paper figures
+# Sized for a two-column page: 3.5 in for a column, 7.16 in across both. No titles; the captions carry them.
+
+PAPER = {**THEMES["light"], "surface": "#ffffff", "plane": "#f3f2ef"}
+
+
+def pchart(t: dict, width: float, height: float, left: float, top: float = 0.3, bottom: float = 0.28):
+    fig = plt.figure(figsize=(width, height), facecolor=t["surface"])
+    ax = fig.add_axes((left / width, bottom / height, (width - left - 0.12) / width, (height - top - bottom) / height),
+                      facecolor=t["surface"])
+    for side in ("top", "right", "left"):
+        ax.spines[side].set_visible(False)
+    ax.spines["bottom"].set_color(t["axis"])
+    ax.tick_params(colors=t["muted"], labelcolor=t["ink2"], length=0, labelsize=7, pad=2)
+    ax.grid(axis="x", color=t["grid"], linewidth=0.6)
+    ax.set_axisbelow(True)
+    fig.legend_y = 1 - 0.13 / height
+    return fig, ax
+
+
+def paper_latency(t: dict):
+    fig, ax = pchart(t, 3.5, 1.45, left=0.42)
+    runs, short = latency_runs(), ["vision ×2", "prefix", "expert_step ×10", "inputs, Euler"]
+    fp32_chunk = runs[0][1]["chunk"]["p50"]
+    for row, (_, r) in enumerate(runs):
+        y, left = 1 - row, 0.0
+        for _, hue, value in LATENCY_PARTS:
+            w = value(r)
+            ax.barh(y, w, left=left, height=0.5, color=t[hue], edgecolor=t["surface"], linewidth=0.8)
+            if w > 120:
+                ax.text(left + w / 2, y, f"{w:.0f}", color=on(t[hue], t), ha="center", va="center", fontsize=6.5)
+            left += w
+        chunk = r["chunk"]["p50"]
+        note = f"{chunk:.0f} ms" + ("" if row == 0 else f", {fp32_chunk / chunk:.1f}×")
+        ax.text(left + 18, y, note, color=t["ink"], va="center", fontsize=7, fontweight="bold")
+    ax.set_yticks([1, 0], ["fp32", "fp16"], color=t["ink"], fontsize=7.5)
+    ax.set_ylim(-0.55, 1.55)
+    ax.set_xlim(0, 1300)
+    ax.set_xticks([0, 250, 500, 750, 1000])
+    ax.set_xticklabels(["0", "250", "500", "750", "1000 ms"])
+    legend(fig, t, [(t[hue], name) for (_, hue, _), name in zip(LATENCY_PARTS, short)], 0.08, size=6.5)
+    return fig
+
+
+def paper_precision(t: dict):
+    rows = precision_rows()
+    short = {"ONNX Runtime, CPU": "ONNX Runtime, CPU", "TensorRT 8.5, Jetson": "TensorRT 8.5, Jetson",
+             "PyTorch fp16all, CPU (4 frames)": "PyTorch fp16all, CPU (4 frames)",
+             "TensorRT 8.5, fp32 layers pinned, Jetson": "TensorRT 8.5 with layer pins, Jetson",
+             "PyTorch, as LeRobot runs it, CPU": "PyTorch, as LeRobot runs it, CPU",
+             "TensorRT 8.5, plain --fp16, Jetson": "TensorRT 8.5, plain --fp16, Jetson"}
+    fig, ax = pchart(t, 7.16, 2.3, left=2.2)
+    for i, (precision, label, values) in enumerate(rows):
+        y = len(rows) - 1 - i
+        offsets = [(-0.14, 0.0, 0.14)[k % 3] for k in range(len(values))]
+        ax.scatter(values, [y + o for o in offsets], s=12, color=t[PRECISION[precision]], edgecolors=t["surface"],
+                   linewidths=0.6, zorder=3)
+        med = statistics.median(values)
+        ax.plot([med, med], [y - 0.32, y + 0.32], color=t["ink"], linewidth=1.3, solid_capstyle="round", zorder=4)
+        ax.text(max(values) * 1.7, y, fmt(max(values)), color=t["ink2"], va="center", fontsize=6.5)
+    ax.set_yticks(range(len(rows) - 1, -1, -1), [f"{p}  ·  {short[label]}" for p, label, _ in rows],
+                  color=t["ink"], fontsize=7)
+    ax.set_ylim(-0.6, len(rows) - 0.4)
+    log_axis(ax, t, -6, 1)
+    ax.axhspan(-0.5, 0.5, color=blend(t["critical"], t["surface"], 0.1), zorder=0, linewidth=0)
+    ax.text(10 ** -5.85, 0, "✕ wrong: actions unrelated to LeRobot's (cosine down to −0.13)", color=t["ink"],
+            fontsize=6.5, va="center")
+    legend(fig, t, [(t[PRECISION[p]], p) for p in ("fp32", "fp16", "bf16")], 2.2, marker="o", size=7)
+    return fig
+
+
+def paper_pinning(t: dict):
+    fig, ax = pchart(t, 3.5, 1.3, left=0.78)
+    names = {"image_tokens": "vision", "prefix_kv": "prefix", "v_t": "expert_step"}
+    rows = pinning_rows()
+    for i, (key, a, b) in enumerate(rows):
+        y = len(rows) - 1 - i
+        ax.plot([b, a], [y, y], color=t["axis"], linewidth=1.3, zorder=2)
+        ax.scatter([a], [y], s=20, color=t["muted"], edgecolors=t["surface"], linewidths=0.6, zorder=3)
+        ax.scatter([b], [y], s=20, color=t["orange"], edgecolors=t["surface"], linewidths=0.6, zorder=3)
+        ax.text(a * 1.4, y, fmt(a), color=t["ink2"], va="center", fontsize=6.5)
+        ax.text(b / 1.4, y, fmt(b), color=t["ink2"], va="center", ha="right", fontsize=6.5)
+    ax.set_yticks(range(len(rows) - 1, -1, -1), [names[k] for k, _, _ in rows], color=t["ink"], fontsize=7.5)
+    ax.set_ylim(-0.6, len(rows) - 0.4)
+    log_axis(ax, t, -4, 0, room=4)
+    ax.tick_params(labelsize=7)
+    legend(fig, t, [(t["muted"], "plain --fp16"), (t["orange"], "with the layer pins")], 0.08, marker="o", size=6.5)
+    return fig
+
+
+def paper_pipeline(t: dict):
+    fig, ax = canvas(t, 71.6, 17)
+    y, h, w, gap = 8.6, 7.6, 12.2, 2.4
+    boxes = [("LeRobot SmolVLA", ["PyTorch, 450M params", "fp32 reference"], "violet"),
+             ("export_split.py", ["3 static ONNX graphs", "+ TensorRT 8.5 flags"], "blue"),
+             ("Engines", ["TensorRT 8.5 or 10,", "ONNX Runtime"], "orange"),
+             ("C++ runtime", ["vision ×2, prefix ×1,", "expert_step ×10"], "aqua"),
+             ("Action chunk", ["50 × 7 actions,", "50 Hz control loop"], "yellow")]
+    xs = [1 + i * (w + gap) for i in range(len(boxes))]
+    for x, (title, body, hue) in zip(xs, boxes):
+        node(ax, t, x, y, w, h, title, body, hue=hue, title_size=7.5, body_size=6.6)
+    for x in xs[:-1]:
+        arrow(ax, t, (x + w + 0.2, y + h / 2), (x + w + gap - 0.2, y + h / 2), lw=1.0)
+    node(ax, t, 1, 1, 69.6, 5, "Parity gate: LeRobot's own fp32 on real LIBERO frames, frozen into bundles",
+         ["compared at every split point: image tokens, prefix K/V, each step's v_t, the action chunk"],
+         hue="magenta", dash=True, title_size=7.3, body_size=6.6)
+    arrow(ax, t, (xs[0] + w / 2, y), (xs[0] + w / 2, 6), colour=t["magenta"], dash=True, lw=0.9)
+    for x in (xs[1], xs[3]):
+        arrow(ax, t, (x + w / 2, 6), (x + w / 2, y), colour=t["magenta"], dash=True, lw=0.9)
+    return fig
+
+
+def paper_chunk(t: dict):
+    fig, ax = canvas(t, 71.6, 24.5)
+    kw = {"title_size": 7.3, "body_size": 6.5}
+    v = "violet"
+    node(ax, t, 1, 19, 12, 4.8, "Cameras ×2", ["512 × 512 each"], hue=v, **kw)
+    node(ax, t, 1, 13.4, 12, 4.8, "Task text", ["48 tokens + mask"], hue=v, **kw)
+    node(ax, t, 1, 7.8, 12, 4.8, "Robot state", ["32 values"], hue=v, **kw)
+    node(ax, t, 1, 1, 12, 4.8, "Noise x₁", ["50 × 32"], hue=v, **kw)
+    node(ax, t, 17, 19, 13, 4.8, "vision", ["→ 64 × 960 per camera"], hue="blue", **kw)
+    node(ax, t, 34, 7.8, 13, 16, "prefix", ["16 SmolVLM layers", "over 177 positions:", "2 × 64 + 48 + 1",
+                                           "→ K/V cache"], hue="blue", **kw)
+    node(ax, t, 51, 19, 19.6, 4.8, "K/V cache", ["16 layers × (K, V), 5 × 177 × 64"], hue="orange", **kw)
+    node(ax, t, 34, 1, 36.6, 4.8, "expert_step ×10 (Euler loop in C++)",
+         ["x ← x − 0.1 · v(x, t, K/V),  t = 1.0 … 0.1;  x₀[:, :7] is the action chunk"], hue="aqua", **kw)
+    for (a, b) in (((13.2, 21.4), (16.8, 21.4)), ((30.2, 21.4), (33.8, 21.4)), ((13.2, 15.8), (33.8, 15.8)),
+                   ((13.2, 10.2), (33.8, 10.2)), ((13.2, 3.4), (33.8, 3.4)), ((47.2, 21.4), (50.8, 21.4))):
+        arrow(ax, t, a, b, lw=1.0)
+    arrow(ax, t, (60.8, 18.8), (60.8, 6.0), colour=t["orange"], lw=1.0)
+    ax.text(60.0, 12.4, "read in place,\nevery step", fontsize=6.3, color=t["ink2"], ha="right", va="center")
+    return fig
+
+
+PAPER_FIGURES = {"fig_pipeline": paper_pipeline, "fig_chunk": paper_chunk, "fig_latency": paper_latency,
+                 "fig_precision": paper_precision, "fig_pinning": paper_pinning}
+
+
 FIGURES = {"overview": overview, "data_flow": data_flow, "architecture": architecture,
            "jetson_latency": jetson_latency, "precision_accuracy": precision_accuracy, "fp16_pinning": fp16_pinning}
 
@@ -373,8 +531,21 @@ def main() -> None:
     ap.add_argument("--out", type=Path, default=ROOT / "docs" / "figures")
     ap.add_argument("--png", type=Path, default=None, help="also write PNGs here")
     ap.add_argument("--only", default=None, help="comma list of figure names")
+    ap.add_argument("--paper", type=Path, default=None, help="write the paper's PDF figures here instead")
     args = ap.parse_args()
     style()
+    if args.paper:
+        plt.rcParams.update({"pdf.fonttype": 42})  # TrueType, embedded: arXiv rejects PDFs with Type 3 fonts
+        args.paper.mkdir(parents=True, exist_ok=True)
+        for name, draw in PAPER_FIGURES.items():
+            fig = draw(PAPER)
+            fig.savefig(args.paper / f"{name}.pdf", facecolor=PAPER["surface"], metadata={"CreationDate": None})
+            if args.png:
+                args.png.mkdir(parents=True, exist_ok=True)
+                fig.savefig(args.png / f"{name}.png", facecolor=PAPER["surface"], dpi=220)
+            plt.close(fig)
+            print(f"wrote {args.paper / name}.pdf")
+        return
     args.out.mkdir(parents=True, exist_ok=True)
     names = args.only.split(",") if args.only else list(FIGURES)
     for name in names:

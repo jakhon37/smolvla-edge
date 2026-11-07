@@ -1,0 +1,22 @@
+# Report
+
+`main.tex` is a technical report on this repo's results, in IEEE's two-column conference format.
+
+## Build
+
+```bash
+cd paper
+latexmk -pdf main.tex        # or: pdflatex main && bibtex main && pdflatex main && pdflatex main
+```
+
+On Overleaf, upload `main.tex`, `refs.bib` and the `figures/` folder; IEEEtran is built in.
+
+## Figures
+
+The PDFs in `figures/` are drawn from `results/*.json` by the same script as the README's figures, sized for a column (3.5 in) or the page width (7.16 in):
+
+```bash
+~/venvs/smolvla/bin/python tools/make_figures.py --paper paper/figures
+```
+
+Every number in the text and tables comes from `results/` and the guides in `docs/`.
