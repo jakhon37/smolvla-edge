@@ -22,3 +22,7 @@ The PDFs in `figures/` are drawn from `results/*.json` by the same script as the
 ```
 
 Every number in the text and tables comes from `results/` and the guides in `docs/`.
+
+## Submitting
+
+[`ARXIV.md`](ARXIV.md) has the steps, the form fields and `make_arxiv.sh`, which packs `main.tex`, `main.bbl`, `refs.bib` and the figures for arXiv.
