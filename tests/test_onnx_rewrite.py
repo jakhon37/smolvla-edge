@@ -6,7 +6,7 @@ import onnxruntime as ort
 import pytest
 from onnx import TensorProto, helper, numpy_helper
 
-from smolvla_latency.onnx_rewrite import decompose_layer_norm, lower_to_opset17
+from smolvla_latency.onnx_rewrite import decompose_layer_norm, lower_to_opset17, trt85_fp16_flags
 
 SHAPE = [1, 4, 8]
 
@@ -121,3 +121,50 @@ def test_lowering_to_opset17_keeps_the_values():
 def test_lowering_refuses_what_it_cannot_lower(node, message):
     with pytest.raises(NotImplementedError, match=message):
         lower_to_opset17(opset18_model(node))
+
+
+def mixed_model(fp32_sigmoid: bool = True, name: str = "sq") -> onnx.ModelProto:
+    """fp16 x -> Cast up -> Mul -> Split in two -> Concat -> Cast down -> Sigmoid, the fp32 part in between as in
+    the fp16 graphs; with fp32_sigmoid also a Sigmoid on the fp32 square, as the expert's time MLP has."""
+    nodes = [
+        helper.make_node("Cast", ["x"], ["up"], name="up", to=TensorProto.FLOAT),
+        helper.make_node("Mul", ["up", "up"], ["sq"], name=name),
+        helper.make_node("Split", ["sq"], ["h1", "h2"], name="halves", axis=2),
+        helper.make_node("Concat", ["h1", "h2"], ["join"], name="join", axis=2),
+        helper.make_node("Cast", ["join"], ["down"], name="down", to=TensorProto.FLOAT16),
+        helper.make_node("Sigmoid", ["down"], ["y"], name="sig16"),
+    ]
+    outputs = [helper.make_tensor_value_info("y", TensorProto.FLOAT16, SHAPE)]
+    if fp32_sigmoid:
+        nodes.append(helper.make_node("Sigmoid", ["sq"], ["z"], name="sig32"))
+        outputs.append(helper.make_tensor_value_info("z", TensorProto.FLOAT, SHAPE))
+    graph = helper.make_graph(nodes, "g", [helper.make_tensor_value_info("x", TensorProto.FLOAT16, SHAPE)], outputs)
+    return helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)], ir_version=10)
+
+
+def specs(flags: list[str]) -> dict[str, str]:
+    assert flags[:2] == ["--fp16", "--precisionConstraints=obey"]
+    assert not any(" " in f for f in flags)  # the exporter writes them on one line, for $(cat ...)
+    return dict(f.split("=", 1) for f in flags[2:])
+
+
+def test_trt85_flags_pin_the_fp32_nodes():
+    flags = specs(trt85_fp16_flags(mixed_model(fp32_sigmoid=False)))
+    assert flags["--layerPrecisions"] == "up:fp32,sq:fp32,halves:fp32,join:fp32"
+    assert flags["--layerOutputTypes"] == "up:fp32,sq:fp32,join:fp32"  # TensorRT gives the Split one output
+
+
+def test_trt85_flags_put_every_sigmoid_in_fp32_when_one_is():
+    flags = specs(trt85_fp16_flags(mixed_model(fp32_sigmoid=True)))
+    assert flags["--layerPrecisions"] == "up:fp32,sq:fp32,halves:fp32,join:fp32,sig32:fp32,sig16:fp32"
+    assert flags["--layerOutputTypes"] == "up:fp32,sq:fp32,join:fp32,sig32:fp32,sig16:fp32"
+
+
+def test_trt85_flags_refuse_what_they_cannot_name_or_type():
+    with pytest.raises(ValueError, match="cannot name"):
+        trt85_fp16_flags(mixed_model(name="sq:0"))
+    model = mixed_model()
+    model.graph.node.append(helper.make_node("Unknown", ["x"], ["w"], name="custom", domain="example"))
+    model.opset_import.append(helper.make_opsetid("example", 1))
+    with pytest.raises(ValueError, match="no dtype"):
+        trt85_fp16_flags(model)

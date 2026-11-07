@@ -23,7 +23,8 @@ Exporter: torch.onnx.export(dynamo=True), i.e. torch.export plus onnxscript, at 
 what ONNX Runtime and the TensorRT 10 parser support. The TorchScript exporter is not offered: under
 transformers 5.5 it fails inside the SigLIP attention-mask code. --for-tensorrt85 writes graphs for TensorRT 8.5, on
 JetPack 5, which cannot import LayerNormalization and misreads opset 18's ReduceMean. The check below then runs on
-those graphs.
+those graphs. TensorRT 8.5 has no strongly typed mode either, so for fp16 it also writes <graph>_fp16.trt85_flags:
+the trtexec flags that keep the graph's fp32 parts in fp32 (docs/SPLIT_GRAPH.md).
 """
 
 import argparse
@@ -40,7 +41,7 @@ from ort_flow import SplitRuntime, onnx_io
 from smolvla_latency import sysinfo
 from smolvla_latency.loading import DEFAULT_TASK, load_config, load_policy, load_processors
 from smolvla_latency.metrics import compare
-from smolvla_latency.onnx_rewrite import decompose_layer_norm, lower_to_opset17
+from smolvla_latency.onnx_rewrite import decompose_layer_norm, lower_to_opset17, trt85_fp16_flags
 from smolvla_latency.precision import apply_variant
 from smolvla_latency.split_contract import (
     EXPERT_OUTPUT_NAMES,
@@ -65,11 +66,15 @@ PRECISIONS = {"fp32": torch.float32, "fp16": torch.float16}
 
 
 def export_graph(module, args: tuple, path: Path, input_names, output_names, opset: int,
-                 decompose_ln: bool = False) -> dict:
-    """Export with static shapes, then keep every weight in one <name>.onnx.data file next to the graph."""
+                 decompose_ln: bool = False, trt85_flags: bool = False) -> dict:
+    """Export with static shapes, then keep every weight in one <name>.onnx.data file next to the graph.
+
+    trt85_flags also writes <name>.trt85_flags, the trtexec flags that build an fp16 graph on TensorRT 8.5.
+    """
     t = time.perf_counter()
     data = path.with_name(path.name + ".data")
-    for stale in (path, data):
+    flags = path.with_suffix(".trt85_flags")
+    for stale in (path, data, flags):
         stale.unlink(missing_ok=True)
     with torch.no_grad():
         torch.onnx.export(module, args, str(path), input_names=list(input_names), output_names=list(output_names),
@@ -85,11 +90,13 @@ def export_graph(module, args: tuple, path: Path, input_names, output_names, ops
     data.unlink(missing_ok=True)
     onnx.save_model(model, str(path), save_as_external_data=True, all_tensors_to_one_file=True,
                     location=data.name, size_threshold=1024)
+    if trt85_flags:  # from the saved graph without its weights: shape inference serializes the whole model
+        flags.write_text(" ".join(trt85_fp16_flags(onnx.load(str(path), load_external_data=False))) + "\n")
     files = [p for p in (path, data) if p.exists()]
     return {"file": path.name, "files": [p.name for p in files], "seconds": round(time.perf_counter() - t, 1),
             "mb": round(sum(p.stat().st_size for p in files) / 2**20, 1),
             "opset": {o.domain or "ai.onnx": o.version for o in model.opset_import},
-            "layer_norms_decomposed": decomposed}
+            "layer_norms_decomposed": decomposed, "trt85_flags": flags.name if trt85_flags else None}
 
 
 def flat(arrays) -> np.ndarray:
@@ -129,7 +136,7 @@ def export_precision(policy, run: ReferenceRun, out_dir: Path, precision: str, o
     results = {}
     for name, (module, example, input_names, output_names) in split_modules(policy, run, precision).items():
         results[name] = export_graph(module, example, out_dir / f"{name}_{precision}.onnx", input_names,
-                                     output_names, opset, decompose_ln)
+                                     output_names, opset, decompose_ln, decompose_ln and precision == "fp16")
         with torch.no_grad():
             out = module(*example)
         out = out if isinstance(out, tuple) else (out,)

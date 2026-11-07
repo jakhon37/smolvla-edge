@@ -21,6 +21,7 @@ import torch
 from lerobot.policies.common.flow_matching import euler_integrate
 from lerobot.policies.common.vla_utils import create_sinusoidal_pos_embedding
 from lerobot.policies.smolvla import modeling_smolvla, smolvlm_with_expert
+from onnx import helper
 from transformers import DynamicCache
 
 from export_split import check_runtime, export_precision, write_manifest
@@ -28,6 +29,7 @@ from ort_flow import SplitRuntime
 from smolvla_latency.bundle import read_bundle, write_bundle
 from smolvla_latency.loading import DEFAULT_TASK, load_policy, load_processors
 from smolvla_latency.metrics import compare
+from smolvla_latency.onnx_rewrite import trt85_fp16_flags
 from smolvla_latency.split_contract import (
     euler_schedule,
     expert_input_names,
@@ -203,6 +205,7 @@ def test_tensorrt85_graphs_match_lerobot_fp32(tiny, tmp_path):
     assert exported["vision"]["layer_norms_decomposed"] > 0
     for name in ("vision", "prefix", "expert_step"):
         assert exported[name]["opset"] == {"ai.onnx": 17}, name  # torch.onnx alone leaves prefix and expert_step at 18
+        assert exported[name]["trt85_flags"] is None and not list(tmp_path.glob("*.trt85_flags"))
         model = onnx.load(str(tmp_path / f"{name}_fp32.onnx"))
         onnx.checker.check_model(model, full_check=True)
         assert "LayerNormalization" not in {n.op_type for n in model.graph.node}
@@ -211,6 +214,21 @@ def test_tensorrt85_graphs_match_lerobot_fp32(tiny, tmp_path):
     for name, g in res["graphs"].items():
         assert g["ort_vs_lerobot_fp32"]["max_abs"] < FP32_TOL, (name, g["ort_vs_lerobot_fp32"])
     assert res["actions_vs_lerobot_fp32"]["max_abs"] < CHUNK_TOL
+
+
+def test_tensorrt85_fp16_export_writes_the_build_flags(tiny, tmp_path):
+    policy, _, _, _ = load_policy(str(tiny.dir), "cpu")  # its own copy: the fp16 export casts it in place
+    exported = export_precision(policy, tiny.run, tmp_path, "fp16", 17, decompose_ln=True)
+    for name in ("vision", "prefix", "expert_step"):
+        model = onnx.load(str(tmp_path / f"{name}_fp16.onnx"), load_external_data=False)
+        flags = (tmp_path / exported[name]["trt85_flags"]).read_text().split()
+        assert flags == trt85_fp16_flags(model), name
+        pinned = set(dict(f.split("=", 1) for f in flags[2:])["--layerPrecisions"].replace(":fp32", "").split(","))
+        casts_up = {n.name for n in model.graph.node if n.op_type == "Cast"
+                    and helper.get_attribute_value(n.attribute[0]) == onnx.TensorProto.FLOAT}
+        assert casts_up and casts_up <= pinned, name  # each way into an fp32 part
+        if name == "expert_step":  # the time MLP's Sigmoid is fp32, so the expert MLPs' fp16 ones are pinned too
+            assert {n.name for n in model.graph.node if n.op_type == "Sigmoid"} <= pinned
 
 
 def test_manifest_is_the_graph_contract(tiny, fp32):

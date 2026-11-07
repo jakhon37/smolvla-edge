@@ -1,4 +1,5 @@
-"""Rewrites of exported ONNX graphs for runtimes that lack an operator. Needs only numpy and onnx."""
+"""Rewrites of exported ONNX graphs for runtimes that lack an operator, and the TensorRT 8.5 build flags that keep an
+fp16 graph's types. Needs only numpy and onnx."""
 
 import numpy as np
 import onnx
@@ -111,3 +112,44 @@ def decompose_layer_norm(model: onnx.ModelProto) -> int:
     del graph.node[:]
     graph.node.extend(nodes)
     return count
+
+
+def trt85_fp16_flags(model: onnx.ModelProto) -> list[str]:
+    """trtexec flags that make TensorRT 8.5 keep an fp16 graph's fp32 parts in fp32.
+
+    TensorRT 8.5 has no strongly typed mode. Its parser marks the fp16 nodes, so a build needs --fp16, and with it
+    Myelin, which fuses nearly the whole graph, computes nodes the graph types as fp32 in fp16 too. With the real
+    weights the vision tokens and the prefix K/V then come out wrong (relative L2 0.22 and 0.86), and the actions
+    unrelated to LeRobot's. These flags pin every node with an fp32 output to fp32: --layerOutputTypes only for
+    single-output nodes, since TensorRT turns a two-output Split into a one-output layer.
+
+    A graph holding Sigmoids of both types gets all of them in fp32: Myelin types the constant 1 of a fused block's
+    Sigmoids once, so with the expert's time-MLP Sigmoid in fp32 its fp16 MLP Sigmoids fail to build.
+    """
+    graph = onnx.shape_inference.infer_shapes(model).graph
+    types = {v.name: v.type.tensor_type.elem_type for v in (*graph.input, *graph.value_info, *graph.output)}
+    types.update({t.name: t.data_type for t in graph.initializer})
+    precisions, output_types = [], []
+    sigmoids = {TensorProto.FLOAT: [], TensorProto.FLOAT16: []}
+    for node in graph.node:
+        where = f"{node.op_type} {node.name!r}"
+        if not node.name or set(node.name) & set(",: "):
+            raise ValueError(f"{where}: a trtexec layer spec cannot name this node")
+        outputs = [types.get(o, TensorProto.UNDEFINED) for o in node.output if o]
+        if TensorProto.UNDEFINED in outputs:
+            raise ValueError(f"{where}: the graph records no dtype for an output")
+        if TensorProto.FLOAT in outputs:
+            precisions.append(node.name)
+            if outputs == [TensorProto.FLOAT]:
+                output_types.append(node.name)
+        if node.op_type == "Sigmoid" and outputs[0] in sigmoids:
+            sigmoids[outputs[0]].append(node.name)
+    if sigmoids[TensorProto.FLOAT] and sigmoids[TensorProto.FLOAT16]:
+        precisions += sigmoids[TensorProto.FLOAT16]
+        output_types += sigmoids[TensorProto.FLOAT16]
+    flags = ["--fp16", "--precisionConstraints=obey"]
+    if precisions:
+        flags.append("--layerPrecisions=" + ",".join(f"{name}:fp32" for name in precisions))
+    if output_types:
+        flags.append("--layerOutputTypes=" + ",".join(f"{name}:fp32" for name in output_types))
+    return flags
