@@ -99,7 +99,7 @@ SmolVLARuntime::SmolVLARuntime(SplitConfig config, std::unique_ptr<Graph> vision
       throw std::invalid_argument("prefix " + to_string(in) + " does not match vision " + to_string(tokens));
     }
   }
-  check_spec(find_spec(prefix_in, "lang_tokens", "prefix"), {DType::kInt64}, {1, c.lang_len}, "prefix");
+  check_spec(find_spec(prefix_in, "lang_tokens", "prefix"), {DType::kInt64, DType::kInt32}, {1, c.lang_len}, "prefix");
   check_spec(find_spec(prefix_in, "lang_mask", "prefix"), {DType::kBool}, {1, c.lang_len}, "prefix");
   check_spec(find_spec(prefix_in, "state", "prefix"), {DType::kFloat32}, {1, c.max_state_dim}, "prefix");
   check_spec(find_spec(prefix_out, out_names[0], "prefix"), {DType::kBool}, {1, c.prefix_len}, "prefix");
@@ -133,7 +133,8 @@ SmolVLARuntime::SmolVLARuntime(SplitConfig config, std::unique_ptr<Graph> vision
     image_tokens_.push_back(make_slot(renamed(tokens, "image_tokens" + suffix), false));
     prefix_->bind(image_tokens_.back().spec.name, image_tokens_.back().device.data());
   }
-  lang_tokens_ = make_slot(find_spec(prefix_in, "lang_tokens", "prefix"), false);
+  const TensorSpec lang_tokens = find_spec(prefix_in, "lang_tokens", "prefix");
+  lang_tokens_ = make_slot(lang_tokens, lang_tokens.dtype != DType::kInt64);
   lang_mask_ = make_slot(find_spec(prefix_in, "lang_mask", "prefix"), false);
   state_ = make_slot(find_spec(prefix_in, "state", "prefix"), false);
   for (const Slot* s : {&lang_tokens_, &lang_mask_, &state_}) prefix_->bind(s->spec.name, s->device.data());
@@ -194,7 +195,14 @@ void SmolVLARuntime::predict_action_chunk(const Observation& obs, const float* n
       device_->copy_from_host(slot.device.data(), obs.pixel_values[cam], slot.spec.bytes());
     }
   }
-  device_->copy_from_host(lang_tokens_.device.data(), obs.lang_tokens, lang_tokens_.spec.bytes());
+  if (lang_tokens_.spec.dtype == DType::kInt32) {
+    auto* tokens = static_cast<int32_t*>(lang_tokens_.host_data());
+    std::transform(obs.lang_tokens, obs.lang_tokens + config_.lang_len, tokens,
+                   [](int64_t id) { return static_cast<int32_t>(id); });  // token ids are far below 2^31
+    upload(lang_tokens_);
+  } else {
+    device_->copy_from_host(lang_tokens_.device.data(), obs.lang_tokens, lang_tokens_.spec.bytes());
+  }
   device_->copy_from_host(lang_mask_.device.data(), obs.lang_mask, lang_mask_.spec.bytes());
   device_->copy_from_host(state_.device.data(), obs.state, state_.spec.bytes());
   timings_.inputs = ms_since(start);

@@ -34,6 +34,8 @@ ONNXTensorElementDataType to_onnx(DType dtype) {
       return ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16;
     case DType::kInt64:
       return ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64;
+    case DType::kInt32:
+      return ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32;
     case DType::kBool:
       return ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL;
   }

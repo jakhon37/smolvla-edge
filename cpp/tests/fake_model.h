@@ -46,6 +46,8 @@ inline float read(FakeGraph& g, const TensorSpec& spec, size_t i) {
       return half_to_float(g.data<uint16_t>(spec.name)[i]);
     case DType::kInt64:
       return static_cast<float>(g.data<int64_t>(spec.name)[i]);
+    case DType::kInt32:
+      return static_cast<float>(g.data<int32_t>(spec.name)[i]);
     case DType::kBool:
       return g.data<uint8_t>(spec.name)[i];
   }
@@ -64,6 +66,9 @@ inline void fill(FakeGraph& g, const TensorSpec& spec, float value) {
       case DType::kInt64:
         g.data<int64_t>(spec.name)[i] = static_cast<int64_t>(value);
         break;
+      case DType::kInt32:
+        g.data<int32_t>(spec.name)[i] = static_cast<int32_t>(value);
+        break;
       case DType::kBool:
         g.data<uint8_t>(spec.name)[i] = value != 0;
         break;
@@ -80,6 +85,7 @@ struct FakeModel {
   SplitConfig config = small_config();
   DType pixel_dtype = DType::kFloat32;
   DType activation_dtype = DType::kFloat32;  // image tokens and K/V
+  DType token_dtype = DType::kInt64;         // lang_tokens; a TensorRT 8.5 engine takes int32
   MemoryKind kind = MemoryKind::kHost;
   std::chrono::milliseconds expert_delay{0};  // added to every expert step, to stand in for slow inference
   std::vector<float> seen_t;
@@ -96,7 +102,7 @@ struct FakeModel {
     for (int64_t c = 0; c < config.num_cameras(); ++c) {
       specs.push_back({"image_tokens_" + std::to_string(c), activation_dtype, {1, config.image_tokens, kHidden}});
     }
-    specs.push_back({"lang_tokens", DType::kInt64, {1, config.lang_len}});
+    specs.push_back({"lang_tokens", token_dtype, {1, config.lang_len}});
     specs.push_back({"lang_mask", DType::kBool, {1, config.lang_len}});
     specs.push_back({"state", DType::kFloat32, {1, config.max_state_dim}});
     return specs;

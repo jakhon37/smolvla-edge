@@ -1,0 +1,353 @@
+{
+ "what": "fp32 split graphs of the real checkpoint on the Jetson GPU, against LeRobot's fp32 predict_action_chunk",
+ "checkpoint": {
+  "policy": "lerobot/smolvla_libero",
+  "revision": "a24f1f380461b665158d52acd140152c79e8b36d"
+ },
+ "code": {
+  "commit": "141cf08; desktop_on also has this result's commit, which drops each engine from the page cache after reading it",
+  "export": "export_split.py --precisions fp32 --for-tensorrt85"
+ },
+ "inputs": {
+  "frames": "the 16 lerobot/libero frames of results/real_weights_cpu.json, same sha256",
+  "arrays_sha256": {
+   "images.observation.images.image": "5b620ddeee81dfa5affc20caa4bff0891114249570bcf8f8a2e1cea9a719dffc",
+   "images.observation.images.image2": "f1bbbe1ad9b0f576e5b051e06f4b151cec1d8f38086dc2792287857fe93c416d",
+   "state": "3c2a8585491efaf7c86040da32fb61f43d42f8d67bd4b4eb9942fbffbeb31975",
+   "demo_actions": "c311d7bd129282371ecec0721748aca3a0c4b723cd69b6535e858bba7fc3e2d1",
+   "demo_valid": "3c65fd3967976a06e69303d71d6cdf247fe133f1045f040744f05a6df7c3ef0a"
+  },
+  "synthetic": "tools/dump_bundle.py, seed 0"
+ },
+ "reference": "LeRobot fp32 on an Intel Xeon E5-1650 v2 (AVX, no AVX2), torch 2.11 CPU, 6 threads",
+ "board": {
+  "module": "Jetson Xavier NX",
+  "gpu": "Volta sm_72",
+  "jetpack": "5.1.6",
+  "tensorrt": "8.5.2",
+  "cuda": "11.4",
+  "power_mode": "MODE_20W_6CORE",
+  "gpu_governor": "nvhost_podgov, clocks not pinned; 1109 MHz, its top, right after the run",
+  "temperature_c": {
+   "cpu_before": 44.5,
+   "cpu_after": 59.5,
+   "gpu_before": 43.0,
+   "gpu_after": 58.0
+  }
+ },
+ "state_during_run": "gdm3 and nxserver stopped, no live robot stack, auto_ros_humble running",
+ "engine_builds": {
+  "vision": {
+   "tool": "trtexec --noTF32 --buildOnly",
+   "desktop": "on, page cache pushed out first",
+   "seconds": 65,
+   "bytes": 393535422,
+   "workspace_mib": 512
+  },
+  "expert_step": {
+   "tool": "trtexec --noTF32 --buildOnly",
+   "desktop": "on, page cache pushed out first",
+   "seconds": 153,
+   "bytes": 400242523,
+   "workspace_mib": 512
+  },
+  "prefix": {
+   "tool": "trtexec --noTF32 --buildOnly",
+   "desktop": "off, page cache dropped",
+   "seconds": 143,
+   "bytes": 782598583,
+   "workspace_mib": 1024,
+   "peak_process_rss_mb": 4925,
+   "lowest_mem_available_mb": 1164,
+   "with_desktop_on": "fails: a 1 GiB CUDA allocation runs out of memory, with 1.1 to 1.5 GB shown available"
+  }
+ },
+ "parity": {
+  "gate_max_abs": 0.0001,
+  "passed_all": true,
+  "frames_16": {
+   "chunk": {
+    "max_abs": 1.621246337890625e-05,
+    "cosine_min": 0.9999999999959523,
+    "nonfinite": 0,
+    "rerun_identical": true,
+    "prefix_pad_mask_equal": true
+   },
+   "stages_vs_lerobot": {
+    "image_tokens_0": {
+     "max_abs": 0.0002288818359375,
+     "rel_l2": 1.9332859195957513e-06,
+     "nonfinite": 0
+    },
+    "image_tokens_1": {
+     "max_abs": 0.0002899169921875,
+     "rel_l2": 1.4665547554706676e-06,
+     "nonfinite": 0
+    },
+    "past_key_values": {
+     "max_abs": 0.00011515617370605469,
+     "rel_l2": 2.3230058224941884e-06,
+     "nonfinite": 0
+    },
+    "x_t_all_steps": {
+     "max_abs": 0.00011056661605834961,
+     "rel_l2": 2.33665267074954e-06,
+     "nonfinite": 0
+    },
+    "v_t_all_steps": {
+     "max_abs": 0.0005633831024169922,
+     "rel_l2": 7.142372909259841e-06,
+     "nonfinite": 0
+    }
+   },
+   "chunk_max_abs_per_frame": [
+    4.0531158447265625e-06,
+    1.5497207641601562e-05,
+    5.424022674560547e-06,
+    4.172325134277344e-06,
+    1.621246337890625e-05,
+    6.4373016357421875e-06,
+    5.0067901611328125e-06,
+    5.245208740234375e-06,
+    6.556510925292969e-06,
+    5.4836273193359375e-06,
+    7.510185241699219e-06,
+    9.5367431640625e-06,
+    1.325458288192749e-05,
+    4.172325134277344e-06,
+    5.304813385009766e-06,
+    6.288290023803711e-06
+   ]
+  },
+  "synthetic": {
+   "chunk": {
+    "max_abs": 5.841255187988281e-06,
+    "cosine_min": 0.999999999997821,
+    "nonfinite": 0,
+    "rerun_identical": true,
+    "prefix_pad_mask_equal": true
+   },
+   "stages_vs_lerobot": {
+    "image_tokens_0": {
+     "max_abs": 0.000152587890625,
+     "rel_l2": 2.264712119170226e-06,
+     "nonfinite": 0
+    },
+    "image_tokens_1": {
+     "max_abs": 0.0001373291015625,
+     "rel_l2": 2.277568717043306e-06,
+     "nonfinite": 0
+    },
+    "past_key_values": {
+     "max_abs": 9.022373706102371e-05,
+     "rel_l2": 2.33323037287918e-06,
+     "nonfinite": 0
+    },
+    "x_t_all_steps": {
+     "max_abs": 5.4836273193359375e-06,
+     "rel_l2": 8.395042046075029e-07,
+     "nonfinite": 0
+    },
+    "v_t_all_steps": {
+     "max_abs": 2.002716064453125e-05,
+     "rel_l2": 1.262349108735748e-06,
+     "nonfinite": 0
+    }
+   }
+  }
+ },
+ "latency_ms": {
+  "note": "warmup 5, 50 chunks; each row of bench's own report",
+  "synthetic": {
+   "chunk": {
+    "p50": 997.3423045,
+    "p90": 1008.0272683999999,
+    "p99": 1011.16999493,
+    "mean": 999.0738019799999,
+    "min": 992.515139,
+    "max": 1011.981309,
+    "n": 50
+   },
+   "vision": {
+    "p50": 323.9595755,
+    "p90": 328.23880920000005,
+    "p99": 333.44484567,
+    "mean": 324.65232258,
+    "min": 321.772409,
+    "max": 335.712309,
+    "n": 100
+   },
+   "prefix": {
+    "p50": 85.90226899999999,
+    "p90": 88.8372728,
+    "p99": 95.87764953,
+    "mean": 86.66210022000001,
+    "min": 85.148877,
+    "max": 96.122602,
+    "n": 50
+   },
+   "expert_step": {
+    "p50": 25.946697999999998,
+    "p90": 26.1618116,
+    "p99": 26.556354000000002,
+    "mean": 25.980215122000015,
+    "min": 25.761818,
+    "max": 26.821754,
+    "n": 500
+   },
+   "inputs": {
+    "p50": 1.4139680000000001,
+    "p90": 1.5890367,
+    "p99": 1.7197071599999998,
+    "mean": 1.4562434400000004,
+    "min": 1.347072,
+    "max": 1.741471,
+    "n": 50
+   },
+   "euler": {
+    "p50": 1.8535520000000076,
+    "p90": 2.0049910999999954,
+    "p99": 2.1179838300000102,
+    "mean": 1.8101704200000064,
+    "min": 1.4924159999999915,
+    "max": 2.1720960000000105,
+    "n": 50
+   }
+  },
+  "frame_0": {
+   "chunk": {
+    "p50": 1003.0112455000001,
+    "p90": 1014.4915513999999,
+    "p99": 1019.77073606,
+    "mean": 1005.2789636400001,
+    "min": 995.835359,
+    "max": 1021.091044,
+    "n": 50
+   },
+   "vision": {
+    "p50": 325.636195,
+    "p90": 331.0847496,
+    "p99": 341.62850555,
+    "mean": 326.9361417899999,
+    "min": 323.045991,
+    "max": 343.448378,
+    "n": 100
+   },
+   "prefix": {
+    "p50": 87.911128,
+    "p90": 89.769169,
+    "p99": 97.97055342,
+    "mean": 88.38322876000001,
+    "min": 85.4467,
+    "max": 98.407948,
+    "n": 50
+   },
+   "expert_step": {
+    "p50": 25.931095,
+    "p90": 26.1141642,
+    "p99": 26.44590181,
+    "mean": 25.960000145999985,
+    "min": 25.711253,
+    "max": 27.032185,
+    "n": 500
+   },
+   "inputs": {
+    "p50": 1.4310105,
+    "p90": 1.6187189,
+    "p99": 1.7099579399999998,
+    "mean": 1.4548852399999999,
+    "min": 1.24298,
+    "max": 1.734406,
+    "n": 50
+   },
+   "euler": {
+    "p50": 1.9015545000000031,
+    "p90": 2.0949672000000077,
+    "p99": 2.406233109999993,
+    "mean": 1.9260198400000001,
+    "min": 1.547364000000016,
+    "max": 2.4874560000000088,
+    "n": 50
+   }
+  }
+ },
+ "desktop_on": {
+  "state": "gdm3 and nxserver running, frame 0, warmup 5, 30 chunks",
+  "chunk_max_abs": 4.0531158447265625e-06,
+  "passed": true,
+  "latency_ms": {
+   "chunk": {
+    "p50": 998.8567,
+    "p90": 1001.8375518,
+    "p99": 1002.71729771,
+    "mean": 998.6174587,
+    "min": 994.304416,
+    "max": 1002.921023,
+    "n": 30
+   },
+   "vision": {
+    "p50": 323.13415299999997,
+    "p90": 326.8096232,
+    "p99": 328.33486443,
+    "mean": 323.61631841666656,
+    "min": 320.574894,
+    "max": 328.637902,
+    "n": 60
+   },
+   "prefix": {
+    "p50": 86.03523799999999,
+    "p90": 87.15003420000001,
+    "p99": 87.39440494,
+    "mean": 86.25906809999998,
+    "min": 85.318945,
+    "max": 87.401253,
+    "n": 30
+   },
+   "expert_step": {
+    "p50": 26.058416,
+    "p90": 26.5735272,
+    "p99": 27.39056252,
+    "mean": 26.149734513333332,
+    "min": 25.776446,
+    "max": 27.465696,
+    "n": 300
+   },
+   "inputs": {
+    "p50": 1.549266,
+    "p90": 1.689218,
+    "p99": 2.663851070000001,
+    "mean": 1.5763849666666667,
+    "min": 1.292802,
+    "max": 3.038884,
+    "n": 30
+   },
+   "euler": {
+    "p50": 1.9614270000000147,
+    "p90": 2.320844399999965,
+    "p99": 2.538325279999995,
+    "mean": 2.0118455,
+    "min": 1.7327710000000138,
+    "max": 2.5482920000000036,
+    "n": 30
+   }
+  },
+  "lowest_mem_available_mb": 750,
+  "before_the_page_cache_change": "the third engine failed to load: a 399 MB CUDA allocation ran out of memory, with 1.3 GB shown available"
+ },
+ "runtime_memory": {
+  "peak_process_rss_mb": 4451,
+  "lowest_mem_available_mb_desktop_off": 1587,
+  "lowest_mem_available_mb_desktop_on": 750,
+  "sampled_every_s": 2
+ },
+ "system": {
+  "cpu": "ARMv8 Processor rev 0 (v8l)",
+  "hardware_threads": 6,
+  "usable_cpus": 6,
+  "compiler": "9.4.0",
+  "assertions": false,
+  "smolvla_rt": "0.1.0",
+  "utc": "2026-11-07T07:38:55Z"
+ },
+ "sources": "smolvla_rt_bench reports: one per bundle with --iters 0, two with --warmup 5 --iters 50"
+}

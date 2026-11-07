@@ -10,13 +10,15 @@
 namespace smolvla_rt {
 
 // The element types of the split graphs and of the bundle format (docs/SPLIT_GRAPH.md). kBool is one byte per
-// element, 0 or 1, as in ONNX Runtime, TensorRT and numpy.
-enum class DType { kFloat32, kFloat16, kInt64, kBool };
+// element, 0 or 1, as in ONNX Runtime, TensorRT and numpy. kInt32 is never in a file: it is how a TensorRT 8.5
+// engine, which has no int64, takes lang_tokens.
+enum class DType { kFloat32, kFloat16, kInt64, kBool, kInt32 };
 
 size_t dtype_size(DType dtype);
-// The numpy names that split_manifest.json and bundles use: "float32", "float16", "int64", "bool".
+// The numpy names: "float32", "float16", "int64", "bool", "int32".
 const char* dtype_name(DType dtype);
-// Inverse of dtype_name; throws std::invalid_argument for any other name.
+// The dtypes split_manifest.json and bundles may hold, by name: all but int32. Throws std::invalid_argument for
+// any other name.
 DType parse_dtype(std::string_view name);
 
 using Shape = std::vector<int64_t>;

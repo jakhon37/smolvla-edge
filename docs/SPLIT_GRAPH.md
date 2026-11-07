@@ -49,6 +49,7 @@ All shapes are static and the batch size is 1. Sizes below use the names in `spl
 - `torch.onnx.export(dynamo=True)`, i.e. torch.export plus onnxscript.
 - Opset 18, IR version 10, within what ONNX Runtime and the TensorRT 10 parser support; `--opset` changes it.
 - The TorchScript exporter is not offered: under transformers 5.5 it fails inside the SigLIP attention-mask code.
+- `--for-tensorrt85` writes opset 17, with `LayerNormalization` as basic ops, for TensorRT 8.5 on JetPack 5. See [TensorRT 8.5](#tensorrt-85).
 
 **Weights**
 - Every graph stores its weights in one external-data file, whatever its size.
@@ -162,7 +163,7 @@ LeRobot's saved preprocessors pad to the longest sequence instead (`pad_language
 | `pixel_values`, `image_tokens`, `past_key_*`, `past_value_*` | fp32 | fp16 |
 | `state`, `x_t`, `t`, `v_t` | fp32 | fp32 |
 
-The fp16 graphs are strongly typed. The weights are cast in PyTorch before export, the profiler's `fp16all` layout, so every cast is explicit in the graph. TensorRT should build them with `STRONGLY_TYPED` and no FP16 builder flag, which TensorRT 11 removes. That is the path `trt_vision.py` takes for the vision graph. No TensorRT engine has been built from any of these graphs yet: the test machine has no GPU.
+The fp16 graphs are strongly typed. The weights are cast in PyTorch before export, the profiler's `fp16all` layout, so every cast is explicit in the graph. TensorRT should build them with `STRONGLY_TYPED` and no FP16 builder flag, which TensorRT 11 removes. That is the path `trt_vision.py` takes for the vision graph. No TensorRT engine has been built from the fp16 graphs in strongly typed mode yet. TensorRT 8.5, which has no such mode, needs the layers pinned instead ([TensorRT 8.5](#tensorrt-85)).
 
 ## What differs from LeRobot's code, and why
 
@@ -183,6 +184,18 @@ The wrappers in `smolvla_latency/split_graph.py` call LeRobot's own `embed_prefi
    - In PyTorch it is bit-identical to LeRobot's `apply_rope`.
 
 The tests check each one against LeRobot.
+
+### TensorRT 8.5
+
+`--for-tensorrt85` changes the graphs after export, in `smolvla_latency/onnx_rewrite.py`, and the export's parity check then runs on the changed graphs. For fp16 it also writes the flags to build them with:
+
+1. **Opset 17.** TensorRT 8.5's parser accepts an opset 18 `ReduceMean` without an error, ignores its axes input and averages over every axis, so the engine gives wrong numbers. ONNX's version converter fails on `prefix` and `expert_step`, and torch.onnx only logs that, so `lower_to_opset17` moves the `Reduce*` axes to attributes and drops `Split`'s `num_outputs`. It refuses any other operator that changed at opset 18. `export_split.py` refuses a graph that comes out at another opset than the one asked for.
+2. **`LayerNormalization` as basic ops**, which TensorRT 8.5 cannot import. `decompose_layer_norm` keeps the statistics in fp32, as `stash_type` 1 says, with explicit Casts in an fp16 graph.
+3. **Build flags for each fp16 graph**, in `<graph>_fp16.trt85_flags`, since TensorRT 8.5 has no strongly typed mode. A build needs `--fp16`, as the parser sets fp16 on the fp16-typed layers, and with it Myelin, which fuses nearly each graph whole, computes the fp32-typed parts in fp16 as well: with the real weights the vision tokens and prefix K/V come out wrong (relative L2 0.22 and 0.86) and the actions unrelated to LeRobot's. `trt85_fp16_flags` adds `--precisionConstraints=obey`, and `--layerPrecisions` and `--layerOutputTypes` pinning every node with an fp32 output to fp32; output types only for single-output nodes, since TensorRT turns a two-output `Split` into a one-output layer. A graph with Sigmoids of both types gets all of them in fp32: Myelin types the constant 1 of a fused block's Sigmoids once, so `expert_step`, whose time MLP has the one fp32 Sigmoid, otherwise fails to build.
+
+In a TensorRT 8.5 engine `lang_tokens` is int32, since it has no int64. `SmolVLARuntime` accepts that and narrows the ids; manifests and bundles stay int64.
+
+With the real weights these fp32 graphs match LeRobot's chunk to 1.6e-5 on 16 LIBERO frames, on a Xavier NX GPU. The fp16 graphs, built with the flags, land within 6.0e-2 of it, in the range of LeRobot's own bf16, at 0.33 s per chunk against 1.0 s. Building the fp32 `prefix` engine takes most of that board's memory: see [the README](../README.md#jetson-xavier-nx-tensorrt-85).
 
 **Not supported** (the export raises `NotImplementedError` naming the setting):
 - `empty_cameras > 0` or masked cameras;
@@ -284,7 +297,7 @@ The test asserts each fp32 graph at 1e-4 and the fp32 chunk at 1e-5. fp16 is rep
 Inputs and outputs had the shapes in the tables above, with `D = 960`, `Hkv = 5` and `Dh = 64`.
 
 **Not tested here**
-- TensorRT engines built from these graphs; there is no GPU on the test machine.
+- TensorRT engines at full size. The tiny model's fp32 engines ran on a Jetson Xavier NX with TensorRT 8.5.2; see the README's "Jetson Xavier NX" section.
 - ONNX Runtime's CUDA execution provider.
 - Real checkpoint weights on a GPU. On the CPU, see the next section.
 

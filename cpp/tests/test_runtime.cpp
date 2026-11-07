@@ -132,6 +132,23 @@ TEST(Runtime, CastsPixelsToHalfForFp16Graphs) {
   EXPECT_EQ(actions, expected_actions(c, in.noise, offset));
 }
 
+TEST(Runtime, NarrowsLanguageTokensForInt32Graphs) {
+  for (const MemoryKind kind : {MemoryKind::kHost, MemoryKind::kCuda}) {
+    FakeModel model;
+    model.token_dtype = DType::kInt32;
+    model.kind = kind;
+    auto built = model.build(std::make_shared<CountingDevice>(kind));
+    const SplitConfig& c = model.config;
+    Inputs in(c);
+    in.lang_tokens = {70000, 2, 3, 4, 5};
+    std::vector<float> actions(static_cast<size_t>(c.chunk_size * c.action_dim));
+    built.runtime->predict_action_chunk(in.obs, in.noise.data(), actions.data());
+    const int32_t* seen = built.prefix->data<int32_t>("lang_tokens");
+    EXPECT_EQ(std::vector<int32_t>(seen, seen + c.lang_len), (std::vector<int32_t>{70000, 2, 3, 4, 5}));
+    EXPECT_EQ(built.runtime->tensor_spec("lang_tokens").dtype, DType::kInt32);
+  }
+}
+
 TEST(Runtime, ObserverSeesEveryStep) {
   FakeModel model;
   auto built = model.build(std::make_shared<HostDevice>());

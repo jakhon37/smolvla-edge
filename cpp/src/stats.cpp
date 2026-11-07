@@ -81,6 +81,11 @@ std::vector<double> to_doubles(const void* data, DType dtype, size_t count) {
       for (size_t i = 0; i < count; ++i) out[i] = p[i] ? 1.0 : 0.0;
       break;
     }
+    case DType::kInt32: {
+      const auto* p = static_cast<const int32_t*>(data);
+      for (size_t i = 0; i < count; ++i) out[i] = p[i];
+      break;
+    }
   }
   return out;
 }

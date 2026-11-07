@@ -16,6 +16,8 @@ size_t dtype_size(DType dtype) {
       return 8;
     case DType::kBool:
       return 1;
+    case DType::kInt32:
+      return 4;
   }
   throw std::invalid_argument("unknown DType");
 }
@@ -30,6 +32,8 @@ const char* dtype_name(DType dtype) {
       return "int64";
     case DType::kBool:
       return "bool";
+    case DType::kInt32:
+      return "int32";
   }
   throw std::invalid_argument("unknown DType");
 }

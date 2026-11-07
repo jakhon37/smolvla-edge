@@ -47,6 +47,8 @@ TEST(Stats, ConvertsEveryDtype) {
   const uint16_t h[] = {0x3c00, 0xc000};
   const int64_t i[] = {3, -4};
   const uint8_t b[] = {1, 0};
+  const int32_t i32[] = {5, -6};
+  EXPECT_EQ(to_doubles(i32, DType::kInt32, 2), (std::vector<double>{5.0, -6.0}));
   EXPECT_EQ(to_doubles(f, DType::kFloat32, 2), (std::vector<double>{1.5, -2.0}));
   EXPECT_EQ(to_doubles(h, DType::kFloat16, 2), (std::vector<double>{1.0, -2.0}));
   EXPECT_EQ(to_doubles(i, DType::kInt64, 2), (std::vector<double>{3.0, -4.0}));

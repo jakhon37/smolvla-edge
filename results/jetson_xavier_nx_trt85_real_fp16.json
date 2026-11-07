@@ -1,0 +1,368 @@
+{
+ "what": "fp16 split graphs of the real checkpoint on the Jetson GPU, against LeRobot's fp32 predict_action_chunk",
+ "checkpoint": {
+  "policy": "lerobot/smolvla_libero",
+  "revision": "a24f1f380461b665158d52acd140152c79e8b36d"
+ },
+ "code": {
+  "commit": "7a505f0 for the graphs and smolvla_rt_bench; this result's commit exports the same graphs, byte for byte, and writes the trt85_flags files the engines were built with",
+  "export": "export_split.py --precisions fp16 --for-tensorrt85"
+ },
+ "inputs": {
+  "frames": "the 16 lerobot/libero frames of results/real_weights_cpu.json, same sha256",
+  "arrays_sha256": {
+   "images.observation.images.image": "5b620ddeee81dfa5affc20caa4bff0891114249570bcf8f8a2e1cea9a719dffc",
+   "images.observation.images.image2": "f1bbbe1ad9b0f576e5b051e06f4b151cec1d8f38086dc2792287857fe93c416d",
+   "state": "3c2a8585491efaf7c86040da32fb61f43d42f8d67bd4b4eb9942fbffbeb31975",
+   "demo_actions": "c311d7bd129282371ecec0721748aca3a0c4b723cd69b6535e858bba7fc3e2d1",
+   "demo_valid": "3c65fd3967976a06e69303d71d6cdf247fe133f1045f040744f05a6df7c3ef0a"
+  },
+  "synthetic": "tools/dump_bundle.py, seed 0"
+ },
+ "reference": "LeRobot fp32 on an Intel Xeon E5-1650 v2 (AVX, no AVX2), torch 2.11 CPU, 6 threads",
+ "board": {
+  "module": "Jetson Xavier NX",
+  "gpu": "Volta sm_72",
+  "jetpack": "5.1.6",
+  "tensorrt": "8.5.2",
+  "cuda": "11.4",
+  "power_mode": "MODE_20W_6CORE",
+  "gpu_governor": "nvhost_podgov, clocks not pinned; 1109 MHz, its top, right after the run",
+  "temperature_c": {
+   "cpu_before": 46.0,
+   "cpu_after": 53.0,
+   "gpu_before": 44.0,
+   "gpu_after": 51.5
+  }
+ },
+ "state_during_run": "desktop on (gdm3 and nxserver running), no live robot stack, auto_ros_humble running",
+ "engine_builds": {
+  "tool": "trtexec --noTF32 $(cat <graph>_fp16.trt85_flags) --buildOnly, plus --profilingVerbosity=detailed for the layer report",
+  "flags": "--fp16 --precisionConstraints=obey, and --layerPrecisions and --layerOutputTypes pinning every node with an fp32 output to fp32; expert_step also has its 16 fp16 Sigmoids in fp32",
+  "desktop": "on, page cache pushed out first",
+  "seconds_note": "trtexec's own log, first to last line",
+  "vision": {
+   "seconds": 130,
+   "bytes": 197087260,
+   "workspace_mib": 256,
+   "nodes_pinned_fp32": 200,
+   "peak_process_rss_mb": 4221,
+   "lowest_mem_available_mb": 1145
+  },
+  "prefix": {
+   "seconds": 167,
+   "bytes": 391864343,
+   "workspace_mib": 512,
+   "nodes_pinned_fp32": 629,
+   "memory": "not recorded; the same graph's build without the flags peaked at 3268 MB with 1975 MB available"
+  },
+  "expert_step": {
+   "seconds": 170,
+   "bytes": 203883614,
+   "workspace_mib": 256,
+   "nodes_pinned_fp32": 635,
+   "of_them_fp16_sigmoids": 16,
+   "peak_process_rss_mb": 2402,
+   "lowest_mem_available_mb": 2873
+  }
+ },
+ "parity": {
+  "gate": null,
+  "frames_16": {
+   "chunk": {
+    "max_abs": 0.059523940086364746,
+    "cosine_min": 0.9999751933492075,
+    "nonfinite": 0,
+    "rerun_identical": true,
+    "pad_mask_equal": true
+   },
+   "stages_vs_lerobot": {
+    "image_tokens_0": {
+     "max_abs": 0.7906570434570312,
+     "rel_l2": 0.005473724792095091,
+     "nonfinite": 0
+    },
+    "image_tokens_1": {
+     "max_abs": 1.1007080078125,
+     "rel_l2": 0.00583142304644374,
+     "nonfinite": 0
+    },
+    "past_key_values": {
+     "max_abs": 0.34514522552490234,
+     "rel_l2": 0.007209203098121632,
+     "nonfinite": 0
+    },
+    "x_t_all_steps": {
+     "max_abs": 0.13147038221359253,
+     "rel_l2": 0.0034212355036114792,
+     "nonfinite": 0
+    },
+    "v_t_all_steps": {
+     "max_abs": 0.7120012044906616,
+     "rel_l2": 0.008205553006587138,
+     "nonfinite": 0
+    }
+   },
+   "chunk_max_abs_per_frame": [
+    0.01275336742401123,
+    0.009532451629638672,
+    0.009045064449310303,
+    0.012117952108383179,
+    0.02061760425567627,
+    0.010855138301849365,
+    0.013758659362792969,
+    0.013118982315063477,
+    0.014955222606658936,
+    0.012907564640045166,
+    0.059523940086364746,
+    0.008208513259887695,
+    0.03140302747488022,
+    0.01026126742362976,
+    0.013929367065429688,
+    0.011782944202423096
+   ]
+  },
+  "synthetic": {
+   "chunk": {
+    "max_abs": 0.02451145648956299,
+    "cosine_min": 0.9999844667679152,
+    "nonfinite": 0,
+    "rerun_identical": true,
+    "pad_mask_equal": true
+   },
+   "stages_vs_lerobot": {
+    "image_tokens_0": {
+     "max_abs": 0.17945098876953125,
+     "rel_l2": 0.0042268589124357814,
+     "nonfinite": 0
+    },
+    "image_tokens_1": {
+     "max_abs": 0.2064056396484375,
+     "rel_l2": 0.004030326921967833,
+     "nonfinite": 0
+    },
+    "past_key_values": {
+     "max_abs": 0.30949676036834717,
+     "rel_l2": 0.006518466542619243,
+     "nonfinite": 0
+    },
+    "x_t_all_steps": {
+     "max_abs": 0.021039724349975586,
+     "rel_l2": 0.001648378262610526,
+     "nonfinite": 0
+    },
+    "v_t_all_steps": {
+     "max_abs": 0.0482822060585022,
+     "rel_l2": 0.0030752780155918796,
+     "nonfinite": 0
+    }
+   }
+  },
+  "each_graph_alone_on_lerobot_inputs_frames_16": {
+   "pad_mask_equal": true,
+   "image_tokens": {
+    "max_abs": 1.101,
+    "rel_l2": 0.00385,
+    "reference_max_abs": 245.3,
+    "nonfinite": 0
+   },
+   "prefix_kv": {
+    "max_abs": 0.3461,
+    "rel_l2": 0.006058,
+    "reference_max_abs": 19.1,
+    "nonfinite": 0
+   },
+   "v_t": {
+    "max_abs": 0.07825,
+    "rel_l2": 0.001492,
+    "reference_max_abs": 5.9,
+    "nonfinite": 0
+   }
+  },
+  "same_frames_on_the_cpu": {
+   "source": "results/real_weights_cpu.json; chunk max abs, which is in action std units",
+   "lerobot_bf16_pytorch": {
+    "median": 0.01819932460784912,
+    "max": 0.04920315742492676,
+    "frames_where_this_run_is_closer_to_fp32": 11
+   },
+   "fp16_graphs_onnxruntime": {
+    "median": 0.0011627525091171265,
+    "max": 0.002013981342315674
+   },
+   "fp16all_pytorch_frames_1_5_9_13": {
+    "max": 0.002863258123397827,
+    "this_run_on_those_frames": [
+     0.009532451629638672,
+     0.010855138301849365,
+     0.012907564640045166,
+     0.01026126742362976
+    ]
+   }
+  }
+ },
+ "latency_ms": {
+  "note": "warmup 5, 50 chunks; each row of bench's own report",
+  "synthetic": {
+   "chunk": {
+    "p50": 329.125412,
+    "p90": 336.6548361,
+    "p99": 395.61717571999986,
+    "mean": 332.79781541999995,
+    "min": 323.959186,
+    "max": 430.798084,
+    "n": 50
+   },
+   "vision": {
+    "p50": 79.61892449999999,
+    "p90": 84.639421,
+    "p99": 116.11988586000007,
+    "mean": 81.38534591000003,
+    "min": 78.309836,
+    "max": 127.647828,
+    "n": 100
+   },
+   "prefix": {
+    "p50": 27.753924,
+    "p90": 28.3816882,
+    "p99": 32.905639579999985,
+    "mean": 28.01267312,
+    "min": 27.246244,
+    "max": 36.138982,
+    "n": 50
+   },
+   "expert_step": {
+    "p50": 12.763346,
+    "p90": 13.2503572,
+    "p99": 14.38966023999999,
+    "mean": 12.871820124,
+    "min": 12.401474,
+    "max": 21.172388,
+    "n": 500
+   },
+   "inputs": {
+    "p50": 11.178722,
+    "p90": 12.743026,
+    "p99": 14.440307279999999,
+    "mean": 11.382134920000006,
+    "min": 9.683682,
+    "max": 14.455266,
+    "n": 50
+   },
+   "euler": {
+    "p50": 1.7863520000000008,
+    "p90": 2.1858177000000043,
+    "p99": 2.8372296100000027,
+    "mean": 1.8716733599999988,
+    "min": 1.5215050000000048,
+    "max": 3.0895360000000096,
+    "n": 50
+   }
+  },
+  "frame_0": {
+   "chunk": {
+    "p50": 327.492369,
+    "p90": 331.7430388,
+    "p99": 335.7984702,
+    "mean": 328.25324282,
+    "min": 323.260336,
+    "max": 337.477171,
+    "n": 50
+   },
+   "vision": {
+    "p50": 79.763196,
+    "p90": 82.273996,
+    "p99": 84.19894484000001,
+    "mean": 80.22441295,
+    "min": 78.563724,
+    "max": 85.499789,
+    "n": 100
+   },
+   "prefix": {
+    "p50": 27.571413,
+    "p90": 28.1060904,
+    "p99": 28.82939681,
+    "mean": 27.664487340000004,
+    "min": 27.1121,
+    "max": 28.895268,
+    "n": 50
+   },
+   "expert_step": {
+    "p50": 12.628129999999999,
+    "p90": 13.0129739,
+    "p99": 13.87069449,
+    "mean": 12.704941752000002,
+    "min": 12.344706,
+    "max": 14.633314,
+    "n": 500
+   },
+   "inputs": {
+    "p50": 11.147298,
+    "p90": 12.1537684,
+    "p99": 12.49493608,
+    "mean": 11.225556319999999,
+    "min": 10.00173,
+    "max": 12.501506,
+    "n": 50
+   },
+   "euler": {
+    "p50": 1.8276329999999987,
+    "p90": 2.1008936999999976,
+    "p99": 2.2272806399999974,
+    "mean": 1.8261685400000007,
+    "min": 1.5064649999999915,
+    "max": 2.2359360000000095,
+    "n": 50
+   }
+  }
+ },
+ "memory": {
+  "peak_process_rss_mb": 2689,
+  "lowest_mem_available_mb": 2061
+ },
+ "without_the_flags": {
+  "tool": "trtexec --noTF32 --fp16 --buildOnly. Without --fp16 the build refuses: the parser sets fp16 on the layers the graph types as fp16",
+  "frames_16_and_synthetic": {
+   "chunk_max_abs": [
+    1.3753628581762314,
+    4.467782199382782
+   ],
+   "chunk_cosine": [
+    -0.12931183018001957,
+    0.9062250783814545
+   ],
+   "nonfinite": 0
+  },
+  "each_graph_alone_on_lerobot_inputs_frames_16": {
+   "pad_mask_equal": true,
+   "image_tokens": {
+    "max_abs": 75.87,
+    "rel_l2": 0.2232,
+    "reference_max_abs": 245.3,
+    "nonfinite": 0
+   },
+   "prefix_kv": {
+    "max_abs": 16.99,
+    "rel_l2": 0.8613,
+    "reference_max_abs": 19.1,
+    "nonfinite": 0
+   },
+   "v_t": {
+    "max_abs": 0.1231,
+    "rel_l2": 0.001955,
+    "reference_max_abs": 5.9,
+    "nonfinite": 0
+   }
+  },
+  "latency_ms_frame_0_chunk": {
+   "p50": 319.3720025,
+   "p90": 324.4016223,
+   "p99": 327.85519443,
+   "mean": 319.89800146000005,
+   "min": 315.689958,
+   "max": 329.944257,
+   "n": 50
+  },
+  "expert_step_with_only_the_fp32_nodes_pinned": "fails to build: Myelin reports 'Could not infer output types' for an add inside node_Sigmoid_101, an fp32 constant 1 against fp16 data, then finds no implementation for the fused block"
+ }
+}

@@ -21,7 +21,10 @@ small projections (state, action in/out, time MLP) stay fp32, so state, x_t, t a
 
 Exporter: torch.onnx.export(dynamo=True), i.e. torch.export plus onnxscript, at opset 18 by default, within
 what ONNX Runtime and the TensorRT 10 parser support. The TorchScript exporter is not offered: under
-transformers 5.5 it fails inside the SigLIP attention-mask code.
+transformers 5.5 it fails inside the SigLIP attention-mask code. --for-tensorrt85 writes graphs for TensorRT 8.5, on
+JetPack 5, which cannot import LayerNormalization and misreads opset 18's ReduceMean. The check below then runs on
+those graphs. TensorRT 8.5 has no strongly typed mode either, so for fp16 it also writes <graph>_fp16.trt85_flags:
+the trtexec flags that keep the graph's fp32 parts in fp32 (docs/SPLIT_GRAPH.md).
 """
 
 import argparse
@@ -38,6 +41,7 @@ from ort_flow import SplitRuntime, onnx_io
 from smolvla_latency import sysinfo
 from smolvla_latency.loading import DEFAULT_TASK, load_config, load_policy, load_processors
 from smolvla_latency.metrics import compare
+from smolvla_latency.onnx_rewrite import decompose_layer_norm, lower_to_opset17, trt85_fp16_flags
 from smolvla_latency.precision import apply_variant
 from smolvla_latency.split_contract import (
     EXPERT_OUTPUT_NAMES,
@@ -61,24 +65,38 @@ from smolvla_latency.split_graph import (
 PRECISIONS = {"fp32": torch.float32, "fp16": torch.float16}
 
 
-def export_graph(module, args: tuple, path: Path, input_names, output_names, opset: int) -> dict:
-    """Export with static shapes, then keep every weight in one <name>.onnx.data file next to the graph."""
+def export_graph(module, args: tuple, path: Path, input_names, output_names, opset: int,
+                 decompose_ln: bool = False, trt85_flags: bool = False) -> dict:
+    """Export with static shapes, then keep every weight in one <name>.onnx.data file next to the graph.
+
+    trt85_flags also writes <name>.trt85_flags, the trtexec flags that build an fp16 graph on TensorRT 8.5.
+    """
     t = time.perf_counter()
     data = path.with_name(path.name + ".data")
-    for stale in (path, data):
+    flags = path.with_suffix(".trt85_flags")
+    for stale in (path, data, flags):
         stale.unlink(missing_ok=True)
     with torch.no_grad():
         torch.onnx.export(module, args, str(path), input_names=list(input_names), output_names=list(output_names),
                           opset_version=opset, dynamo=True)
     model = onnx.load(str(path))
+    declared = next(o.version for o in model.opset_import if o.domain in ("", "ai.onnx"))
+    if (declared, opset) == (18, 17):
+        lower_to_opset17(model)  # torch.onnx only logs it when its version converter fails, and returns opset 18
+    elif declared != opset:
+        raise RuntimeError(f"{path.name}: asked for opset {opset}, the exporter wrote {declared}")
+    decomposed = decompose_layer_norm(model) if decompose_ln else 0
     path.unlink()
     data.unlink(missing_ok=True)
     onnx.save_model(model, str(path), save_as_external_data=True, all_tensors_to_one_file=True,
                     location=data.name, size_threshold=1024)
+    if trt85_flags:  # from the saved graph without its weights: shape inference serializes the whole model
+        flags.write_text(" ".join(trt85_fp16_flags(onnx.load(str(path), load_external_data=False))) + "\n")
     files = [p for p in (path, data) if p.exists()]
     return {"file": path.name, "files": [p.name for p in files], "seconds": round(time.perf_counter() - t, 1),
             "mb": round(sum(p.stat().st_size for p in files) / 2**20, 1),
-            "opset": {o.domain or "ai.onnx": o.version for o in model.opset_import}}
+            "opset": {o.domain or "ai.onnx": o.version for o in model.opset_import},
+            "layer_norms_decomposed": decomposed, "trt85_flags": flags.name if trt85_flags else None}
 
 
 def flat(arrays) -> np.ndarray:
@@ -112,12 +130,13 @@ def split_modules(policy, run: ReferenceRun, precision: str) -> dict[str, tuple]
     }
 
 
-def export_precision(policy, run: ReferenceRun, out_dir: Path, precision: str, opset: int) -> dict:
+def export_precision(policy, run: ReferenceRun, out_dir: Path, precision: str, opset: int,
+                     decompose_ln: bool = False) -> dict:
     """Export the three graphs; also keep the PyTorch outputs for the same example inputs."""
     results = {}
     for name, (module, example, input_names, output_names) in split_modules(policy, run, precision).items():
         results[name] = export_graph(module, example, out_dir / f"{name}_{precision}.onnx", input_names,
-                                     output_names, opset)
+                                     output_names, opset, decompose_ln, decompose_ln and precision == "fp16")
         with torch.no_grad():
             out = module(*example)
         out = out if isinstance(out, tuple) else (out,)
@@ -186,11 +205,16 @@ def main() -> None:
     ap.add_argument("--device", default="cpu", help="where PyTorch traces and computes the reference")
     ap.add_argument("--out-dir", type=Path, default=Path("onnx_split"))
     ap.add_argument("--precisions", default="fp32,fp16", help=f"comma list from {list(PRECISIONS)}")
-    ap.add_argument("--opset", type=int, default=18)
+    ap.add_argument("--opset", type=int, default=None, help="default 18, or 17 with --for-tensorrt85")
+    ap.add_argument("--for-tensorrt85", action="store_true",
+                    help="graphs TensorRT 8.5 (JetPack 5) reads correctly: opset 17, LayerNormalization as basic ops")
     ap.add_argument("--task", default=DEFAULT_TASK)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--no-check", action="store_true", help="skip the ONNX Runtime parity check")
     args = ap.parse_args()
+    if args.for_tensorrt85 and args.opset not in (None, 17):
+        raise SystemExit(f"--for-tensorrt85 needs opset 17: TensorRT 8.5 misreads opset {args.opset}'s ReduceMean")
+    opset = args.opset or (17 if args.for_tensorrt85 else 18)
     precisions = [p.strip() for p in args.precisions.split(",") if p.strip()]
     if unknown := [p for p in precisions if p not in PRECISIONS]:
         raise SystemExit(f"unknown precisions {unknown}; choose from {list(PRECISIONS)}")
@@ -214,7 +238,7 @@ def main() -> None:
           f"({cfg.pad_language_to}) moves the PyTorch actions by max_abs "
           f"{padding['fixed_vs_saved_actions']['max_abs']:.2e}")
 
-    exported = {p: export_precision(policy, run, args.out_dir, p, args.opset) for p in precisions}
+    exported = {p: export_precision(policy, run, args.out_dir, p, opset, args.for_tensorrt85) for p in precisions}
     manifest = write_manifest(args.out_dir, policy, run, exported, args.policy)
 
     report = {"tool": "smolvla-edge/export_split.py", "system": sysinfo.collect(), "policy": args.policy,
