@@ -2,12 +2,15 @@
 
 [![CI](https://github.com/jakhon37/smolvla-edge/actions/workflows/ci.yml/badge.svg)](https://github.com/jakhon37/smolvla-edge/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![Preprint](https://img.shields.io/badge/preprint-10.20944%2Fpreprints202611.0970.v1-0b5ea8.svg)](https://www.preprints.org/manuscript/202611.0970/v1)
 
 **Hugging Face's SmolVLA robot policy on a Jetson, three times faster, without changing what it does.**
 
 [SmolVLA](https://huggingface.co/papers/2506.01844) is the 450M-parameter vision-language-action policy in [LeRobot](https://github.com/huggingface/lerobot): camera images, a task sentence and the robot's state in, a chunk of 50 actions out. This repo splits it into three ONNX graphs, runs them from C++ on ONNX Runtime or TensorRT, and checks every stage against LeRobot's own fp32 before claiming any speed-up. On a Jetson Xavier NX one action chunk takes 1.0 s in fp32 and 0.33 s in fp16.
 
 The question behind it: where does SmolVLA's time go on a small GPU, and what do lower precisions and TensorRT buy without changing its actions?
+
+**Paper:** [*Faster but Not Different: Parity-Checked Deployment of the SmolVLA Robot Policy on a Jetson Xavier NX*](https://www.preprints.org/manuscript/202611.0970/v1), Preprints.org, 2026.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/figures/overview-dark.svg">
@@ -84,6 +87,7 @@ On a GPU, `bash scripts/setup_env.sh && bash scripts/run_p0.sh` profiles every p
 | [Precision layout and method](docs/PRECISION.md) | Which dtypes LeRobot really runs, the variants, how timing and parity are taken |
 | [Split-graph contract](docs/SPLIT_GRAPH.md) | Every tensor's name, shape, dtype and layout; the Euler rule; the bundle format |
 | [Real weights on the CPU](results/REAL_WEIGHTS_CPU.md) | The full real-weights write-up, with the fp16 range probe |
+| [Technical report](https://www.preprints.org/manuscript/202611.0970/v1) | The 5-page paper on Preprints.org; its LaTeX source and figures are in [`paper/`](paper) |
 
 ## Status
 
@@ -101,6 +105,20 @@ On a GPU, `bash scripts/setup_env.sh && bash scripts/run_p0.sh` profiles every p
 - A precision layout that matches what LeRobot actually runs, checked against LeRobot.
 - A strongly typed FP16 path that survives TensorRT 11's removal of weak typing.
 - The real checkpoint on a Jetson Xavier NX, fp32 and fp16, with the changes TensorRT 8.5 needs to compute it correctly.
+
+## Citation
+
+If this work helps yours, please cite the report:
+
+```bibtex
+@article{nodirov2026faster,
+  title   = {Faster but Not Different: Parity-Checked Deployment of the {SmolVLA} Robot Policy on a {Jetson Xavier NX}},
+  author  = {Nodirov, Jakhongir},
+  journal = {Preprints},
+  year    = {2026},
+  doi     = {10.20944/preprints202611.0970.v1}
+}
+```
 
 ## Licence
 

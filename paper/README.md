@@ -2,6 +2,8 @@
 
 `main.tex` is a technical report on this repo's results, in IEEE's two-column conference format.
 
+Posted on Preprints.org as [doi:10.20944/preprints202611.0970.v1](https://www.preprints.org/manuscript/202611.0970/v1) (v1, November 2026).
+
 ## Build
 
 ```bash

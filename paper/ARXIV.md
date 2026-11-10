@@ -24,7 +24,7 @@ On arXiv's upload page, add the `.tar.gz` file whole; arXiv unpacks it. The scri
 | Title | Faster but Not Different: Parity-Checked Deployment of the SmolVLA Robot Policy on a Jetson Xavier NX |
 | Authors | Jakhongir Nodirov |
 | Abstract | Below; plain text, 1159 characters (the limit is 1920) |
-| Comments | 5 pages, 5 figures, 4 tables. Code, results and figures: https://github.com/jakhon37/smolvla-edge |
+| Comments | 5 pages, 5 figures, 4 tables. Also posted on Preprints.org: doi:10.20944/preprints202611.0970.v1. Code, results and figures: https://github.com/jakhon37/smolvla-edge |
 | Primary category | cs.RO (Robotics) |
 | Cross-list | cs.LG (Machine Learning) |
 | License | CC BY 4.0 |
